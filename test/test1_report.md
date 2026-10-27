@@ -27,7 +27,8 @@
 
 - verify_model.py: OVERALL PASS (스케치 닫힌 와이어, 피처별 유효 솔리드 + 체적 > 0, 단일 솔리드).
 - per-step 게이트: 각 피처 생성 시마다 검증, 실패한 단계만 재생성 (전체 재생성 없음).
-- 모델-vs-도면 대조: v5 모델에서 TechDraw 2D 도면을 생성해 정면/측면/평면 투영 확보 (치수 기입은 미포함, 후속 작업).
+- 모델-vs-도면 대조: v5 모델에서 TechDraw HLR 투영(콘솔 모드)으로 정면/측면/평면 투영 도면을 생성해 확보 (PDF/PNG, 치수 기입은 미포함, 후속 작업).
+  참고: TechDraw Page(도면 페이지) 내보내기는 헤드리스 GUI 모드에서 동작하지 않아 (Page 타입 미등록 + GUI 행) 콘솔 HLR 투영(project 함수)으로 우회함.
 
 ## 4. 테스트 이력 (시행착오 기록) — v1 → v5
 
@@ -54,6 +55,7 @@
   (2026-10-27 합의, 본 테스트의 남은 미확인 항목에 첫 적용 — inputs/real-drawing/reading_sheet.md 참조).
 - 표준 부품 표준 도구: 기어 → InvoluteGear, 나사 → 탭드릴 + 탭 (Hole 기능의 커스텀 나사 한계 확인).
 - 모델-vs-도면 대조 게이트: 빌드 후 정면/측면/평면 투영을 도면 뷰와 비교.
+- 헤드리스 2D 도면: TechDraw Page는 GUI 모드에서만 동작하므로, 헤드리스에서는 TechDraw project 함수(HLR)로 투영 후 렌더링하는 경로를 쓸 것.
 - 버전별 파일 + 피처별 게이트 + STEP 명암 렌더 유지 (시행착오를 싸게 만든 장치).
 
 ## 6. 미확인 항목 — 사용자 답변으로 종결 (2026-10-27)
@@ -69,7 +71,8 @@
 ## 7. 파일 목록
 
 - test1_results.zip: real_drawing_gear_v5.fcstd, real_drawing_gear_v5.step (생성물만 포함, 원본 도면 이미지 제외).
-- real_drawing_gear_v5_drawing.pdf / .svg: v5 모델에서 생성한 TechDraw 2D 도면 (정면/측면/평면 투영, 치수 미기입).
+- real_drawing_gear_v5_drawing.pdf / .png: v5 모델에서 생성한 HLR 투영 2D 도면 (정면/측면/평면 투영, 치수 미기입).
+  TechDraw Page 내보내기 대신 TechDraw project 함수(콘솔 HLR)로 생성.
 - 본 보고서: test1_report.md.
 - 보안: 사용자가 첨부한 원본 도면 이미지는 본 보고서와 GitHub 업로드, zip 어디에도 포함하지 않음.
 
