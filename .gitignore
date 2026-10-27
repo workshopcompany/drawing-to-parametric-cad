@@ -1,0 +1,9 @@
+# FreeCAD backups and caches
+*.FCStd1
+*.FCStd2
+*.fcstd1
+__pycache__/
+*.pyc
+
+# Local notes (not part of the submission)
+*.local.md
