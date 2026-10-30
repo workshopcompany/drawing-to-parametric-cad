@@ -104,6 +104,22 @@ resume, so paste the previous answers again too. Chained
 Continue-work runs no longer compound timestamps in folder names
 (the old stamp is stripped before a new one is appended).
 
+## Q&A history auto-accumulates (qa_history.txt) — no re-pasting
+When you answer via Continue work, that round's questions +
+answers accumulate into qa_history.txt in the new folder. The
+next run's prompt includes the full Q&A history automatically,
+so each round only needs the new answers (previously only the
+immediate previous questions + new answers were carried, so
+everything had to be re-pasted every round). The accumulated
+history is visible/downloadable as qa_history.txt in the result's
+file list. Note: Continue work is still a fresh run from scratch,
+not a patch to the old macro — there is no resume-the-model
+feature. Each result folder IS the saved project: drawing,
+outline, report, questions, macro, and model (if any) stay in
+the folder, and restarting the server in the same folder shows
+them in recent runs again (starting in a different folder does
+not — recent runs scan the server's working folder).
+
 ## Ask first (on by default) — the back-and-forth loop
 "Ask questions first" is on by default. The first run builds no
 model and only extracts questions (report says "ASK-FIRST", no

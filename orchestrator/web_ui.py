@@ -335,18 +335,19 @@ S = {
                     "✏️ 질문에 답하고 계속 작업"),
     "answer_note": ("Write your answers below and press Continue work: "
                     "the drawing/outline are taken automatically from "
-                    "this result, and a new run starts with your "
-                    "answers reflected. This is a fresh run from "
-                    "scratch, not a patch to the old macro. Output "
-                    "goes to a new timestamped folder. Previous part "
-                    "notes are NOT carried over, so include anything "
-                    "still needed in the answers.",
+                    "this result, and the full Q&A history so far is "
+                    "included automatically, so write only the new "
+                    "answers. This is a fresh run from scratch, not a "
+                    "patch to the old macro. Output goes to a new "
+                    "timestamped folder, where the accumulated Q&A is "
+                    "saved as qa_history.txt.",
                     "아래에 답을 적고 계속 작업을 누르면, 도면/윤곽은 이 "
-                    "결과에서 자동으로 가져오고 답이 반영된 새 실행이 "
-                    "시작됩니다. 이전 매크로를 이어서 고치는 게 아니라, "
-                    "처음부터 새로 만드는 실행입니다. 출력은 시간 붙은 "
-                    "새 폴더에 생깁니다. 이전 부품 설명은 자동으로 안 "
-                    "넘어가니, 필요하면 답변에 같이 적으세요."),
+                    "결과에서 자동으로 가져오고 지금까지의 Q&A 내역도 "
+                    "자동으로 포함되니 새 답변만 적으면 됩니다. 이전 "
+                    "매크로를 이어서 고치는 게 아니라, 처음부터 새로 "
+                    "만드는 실행입니다. 출력은 시간 붙은 새 폴더에 "
+                    "생기고, 누적된 Q&A는 새 폴더의 qa_history.txt에 "
+                    "저장됩니다."),
     "answer_label": ("Answers (one per question)",
                      "답변 (질문별로 적으세요)"),
     "key_note": ("Key is not stored, used only for this run. Empty "
@@ -831,10 +832,18 @@ def resolve_run_output_dir(raw):
         # Strip a previous _YYYYMMDD_HHMMSS suffix first: chained
         # /answer runs otherwise compound timestamps in the folder
         # name (my_run_output_..._..._...), risking Windows MAX_PATH.
+        # If the stamped name already exists (two runs in the same
+        # second), append _2, _3, ... so runs never share a folder.
         import re as _re
         base = _re.sub(r"_\d{8}_\d{6}$", "", path.name)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = path.with_name(f"{base}_{stamp}")
+        _n = 2
+        while (path.is_dir()
+               and ((path / "report.txt").is_file()
+                    or (path / "model.fcstd").is_file())):
+            path = path.with_name(f"{base}_{stamp}_{_n}")
+            _n += 1
     return path
 
 
@@ -1467,6 +1476,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         lang = pick_lang(fields.get("lang", ""))
+        qa_trail = ""
         if parsed.path == "/answer":
             # Translate the answer form into a /run-equivalent
             # submission, then fall through to the shared /run logic
@@ -1535,27 +1545,33 @@ class Handler(BaseHTTPRequestHandler):
             # resolve_run_output_dir() timestamps this, since the
             # previous folder already holds a report/model.
             fields["output_dir"] = str(prev_dir)
-            # Carry the previous questions as context, not just the
-            # answers: without them the next run can re-ask the same
-            # questions or drop features the answers settled.
+            # Accumulate the FULL Q&A trail. Until now only the
+            # immediate previous questions + new answers went into
+            # the prompt, so earlier rounds' answers were lost and
+            # users had to re-paste everything every round (Oct 30
+            # home-run pain). The trail is append-only (one entry per
+            # round, no duplication), goes into the prompt in full,
+            # and is saved as qa_history.txt in the new folder.
+            prev_history = ""
+            prev_history_path = prev_dir / "qa_history.txt"
+            if prev_history_path.is_file():
+                prev_history = prev_history_path.read_text(
+                    encoding="utf-8", errors="replace").strip()
             if prev_questions:
-                fields["notes"] = (
-                    "Previous questions:\n" + prev_questions
-                    + ("\nNumbered drawing dimensions:\n" + prev_dims_text
-                       if prev_dims_text else "")
-                    + "\nAnswers to the previous run's questions:\n"
-                    + answers
-                    + f"\n(Previous run folder: {prev_dir.name})")
+                _entry = ("Questions:\n" + prev_questions
+                          + "\nAnswers:\n" + answers)
             elif answers:
-                fields["notes"] = (
-                    ("Numbered drawing dimensions:\n" + prev_dims_text + "\n"
-                     if prev_dims_text else "")
-                    + "Answers to the previous run's questions:\n"
-                    + answers
-                    + f"\n(Previous run folder: {prev_dir.name})")
+                _entry = "Answers:\n" + answers
             else:
-                fields["notes"] = (
-                    "Ask-first step asked no questions. Build now.")
+                _entry = "Ask-first step asked no questions. Build now."
+            qa_trail = ((prev_history + "\n" if prev_history else "")
+                        + _entry)
+            fields["notes"] = (
+                "Q&A history (all previous questions and answers, "
+                "in order):\n" + qa_trail
+                + ("\nNumbered drawing dimensions:\n" + prev_dims_text
+                   if prev_dims_text else "")
+                + f"\n(Previous run folder: {prev_dir.name})")
 
         dry_run = fields.get("dry_run") == "on"
         api_key = fields.get("api_key", "")
@@ -1629,6 +1645,12 @@ class Handler(BaseHTTPRequestHandler):
         # own output, which never prints the key, and this page shows
         # only report/guidance/file names, never the command or the key.
         if parsed.path == "/answer" and prev_dir is not None:
+            if qa_trail:
+                try:
+                    (output_dir / "qa_history.txt").write_text(
+                        qa_trail + "\n", encoding="utf-8")
+                except OSError:
+                    pass
             for _name in ("dimensions.json", "drawing_numbered.png"):
                 _src = prev_dir / _name
                 _dst = output_dir / _name
