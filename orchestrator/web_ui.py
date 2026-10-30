@@ -122,6 +122,9 @@ def form_page():
 <form action="/run" method="post" enctype="multipart/form-data">
 <label for="drawing">도면 이미지</label>
 <input type="file" id="drawing" name="drawing" accept="image/*" required>
+<label for="outline">윤곽 첨부 (선택)</label>
+<input type="file" id="outline" name="outline" accept="image/*,.json,.txt">
+<p class="note">윤곽 스냅 도구(outline_snap_tool.html)에서 뽑은 JSON, 또는 윤곽 이미지. JSON은 요약해서 LLM 프롬프트에 넣고, 이미지는 두 번째 이미지로 LLM에 보냅니다. 원본은 출력 폴더에 outline_input.* 으로 보관됩니다.</p>
 <label for="notes">부품 설명 (선택)</label>
 <textarea id="notes" name="notes" placeholder="예: 기어, 모듈 0.5, 30T"></textarea>
 <label><input type="checkbox" name="gear" value="on"> 기어 부품 (체크하면 --gear, 기어 참조 포함)</label>
@@ -237,6 +240,36 @@ def result_page(output_dir, returncode, stdout_tail=""):
         lines.append("<h2>guidance.txt</h2><pre>")
         lines.append(html.escape(guidance.read_text(encoding="utf-8", errors="replace")))
         lines.append("</pre>")
+    # Visual section: input images and model previews, shown inline
+    # in the browser (via /view, not as downloads).
+    def view_link(name):
+        query = urllib.parse.urlencode({"dir": str(output_dir), "file": name})
+        return f"/view?{query}"
+    image_files = []
+    if output_dir.is_dir():
+        for path in sorted(output_dir.iterdir()):
+            if path.is_file() and path.suffix.lower() in (
+                    ".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                image_files.append(path.name)
+    input_images = [n for n in image_files
+                    if n.startswith("input_drawing") or n.startswith("input_outline")]
+    previews = [n for n in image_files if n.startswith("preview_")]
+    if input_images:
+        lines.append("<h2>입력 이미지 (브라우저에서 보기)</h2>")
+        for name in input_images:
+            lines.append(
+                f"<p>{html.escape(name)}<br>"
+                f"<img src=\"{view_link(name)}\" "
+                f"alt=\"{html.escape(name)}\" style=\"max-width:100%;\"></p>")
+    if previews:
+        lines.append("<h2>결과 프리뷰 (눈으로 보기)</h2>")
+        lines.append("<p class=\"note\">STEP 테셀레이션에서 만든 음영 프리뷰입니다. "
+                     "치수 도면이 아니라 형상 확인용입니다.</p>")
+        for name in previews:
+            lines.append(
+                f"<p>{html.escape(name)}<br>"
+                f"<img src=\"{view_link(name)}\" "
+                f"alt=\"{html.escape(name)}\" style=\"max-width:100%;\"></p>")
     lines.append("<h2>출력 파일</h2><ul>")
     if output_dir.is_dir():
         for path in sorted(output_dir.iterdir()):
@@ -269,6 +302,30 @@ class Handler(BaseHTTPRequestHandler):
             data = form_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path == "/view":
+            # Inline image view (no attachment header), same safe-path
+            # guard as /download, images only.
+            query = urllib.parse.parse_qs(parsed.query)
+            raw_dir = query.get("dir", [""])[0]
+            raw_file = query.get("file", [""])[0]
+            output_dir = Path(raw_dir).resolve() if raw_dir else None
+            target = safe_download_path(output_dir, raw_file) if output_dir else None
+            mime, _enc = mimetypes.guess_type(str(target)) if target else (None, None)
+            if target is None or not (mime or "").startswith("image/"):
+                data = error_page("브라우저에서 볼 수 없는 파일입니다.")
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -364,6 +421,12 @@ class Handler(BaseHTTPRequestHandler):
             "--output-dir", str(output_dir),
             "--freecadcmd", fields.get("freecadcmd", "freecadcmd") or "freecadcmd",
         ]
+        if "outline" in files and files["outline"][1]:
+            outline_name, outline_bytes = files["outline"]
+            outline_suffix = Path(outline_name).suffix or ".bin"
+            outline_path = output_dir / f"input_outline{outline_suffix}"
+            outline_path.write_bytes(outline_bytes)
+            command += ["--outline", str(outline_path)]
         notes = fields.get("notes", "").strip()
         if notes:
             command += ["--text", notes]

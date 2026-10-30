@@ -130,12 +130,52 @@ def load_text(path, label):
         die(f"cannot read {label} {path}: {exc}")
 
 
-def build_prompt(principles_text, gear_text, user_text, output_dir):
+def summarize_outline_json(data, max_chars=6000):
+    """Compact a snap-tool outline JSON for the prompt.
+
+    Full sample lists (e.g. 1202 loop points) are NOT sent verbatim:
+    they would cost ~18k tokens. Instead the summary keeps the
+    structure (segment/slot/root keys), scalar values, and a sampled
+    subset (every Nth point, max 200 points) of any long point list,
+    plus its bounding box. The full original file is copied to the
+    output folder as outline_input.* for the record.
+    """
+    lines = ["User-captured outline (snap tool output, summarized):"]
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, list):
+                if value and isinstance(value[0], (list, tuple)):
+                    xs = [p[0] for p in value if len(p) >= 1]
+                    ys = [p[1] for p in value if len(p) >= 2]
+                    step = max(1, len(value) // 200)
+                    sample = value[::step][:200]
+                    lines.append(
+                        f"- {key}: {len(value)} points, "
+                        f"bbox X {min(xs):.4f}..{max(xs):.4f}, "
+                        f"Y {min(ys):.4f}..{max(ys):.4f}, "
+                        f"sample (every {step}th, max 200): {sample}")
+                else:
+                    lines.append(f"- {key}: {value}")
+            elif isinstance(value, dict):
+                lines.append(f"- {key}: {value}")
+            else:
+                lines.append(f"- {key}: {value}")
+    else:
+        lines.append(str(data)[:max_chars])
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n... (outline summary truncated)"
+    return text
+
+
+def build_prompt(principles_text, gear_text, user_text, output_dir, outline_text=""):
     parts = [principles_text]
     if gear_text:
         parts.append(gear_text)
     if user_text:
         parts.append(f"User text:\n{user_text}")
+    if outline_text:
+        parts.append(outline_text)
     parts.append(MACRO_INSTRUCTION)
     # Tell the macro where its own outputs must go. These paths are
     # runtime values from --output-dir, never hardcoded in this script.
@@ -147,7 +187,8 @@ def build_prompt(principles_text, gear_text, user_text, output_dir):
     return "\n\n".join(parts)
 
 
-def build_messages(prompt_text, image_b64, mime_type, extra=None):
+def build_messages(prompt_text, image_b64, mime_type, extra=None,
+                   outline_image=None):
     user_content = [
         {"type": "text", "text": prompt_text},
         {
@@ -158,6 +199,14 @@ def build_messages(prompt_text, image_b64, mime_type, extra=None):
             "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
         },
     ]
+    if outline_image is not None:
+        outline_b64, outline_mime = outline_image
+        user_content.append(
+            {"type": "text",
+             "text": "Outline image (user-captured outline, second image):"})
+        user_content.append(
+            {"type": "image_url",
+             "image_url": {"url": f"data:{outline_mime};base64,{outline_b64}"}})
     if extra:
         user_content.insert(0, {"type": "text", "text": extra})
     return [
@@ -268,8 +317,9 @@ def verify_step(freecadcmd, step_path, output_dir):
     """
     snippet = output_dir / "verify_step.py"
     snippet.write_text(
-        "import Part\n"
+        "import Part, json\n"
         f"step_path = {str(step_path)!r}\n"
+        f"tris_path = {str(output_dir / 'tris.json')!r}\n"
         "try:\n"
         "    shape = Part.read(step_path)\n"
         "    if isinstance(shape, (list, tuple)):\n"
@@ -278,6 +328,9 @@ def verify_step(freecadcmd, step_path, output_dir):
         "    shape = Part.Shape()\n"
         "    shape.read(step_path)\n"
         "verts, _facets = shape.tessellate(0.01)\n"
+        "with open(tris_path, 'w', encoding='utf-8') as fh:\n"
+        "    json.dump({'verts': [[v.x, v.y, v.z] for v in verts],\n"
+        "               'facets': [list(f) for f in _facets]}, fh)\n"
         "xs = [v.x for v in verts]; ys = [v.y for v in verts]; zs = [v.z for v in verts]\n"
         "print(f\"VERDICT solids={len(shape.Solids)} valid={shape.isValid()} \"\n"
         "      f\"volume={shape.Volume:.4f} \"\n"
@@ -333,6 +386,11 @@ def parse_args(argv=None):
     )
     parser.add_argument("--drawing", required=True,
                         help="Drawing image file (read, never copied into the repo).")
+    parser.add_argument("--outline", default="",
+                        help="Optional outline attachment (snap-tool JSON or "
+                        "outline image). JSON is summarized for the prompt "
+                        "(full file copied to output folder); an image is "
+                        "sent to the LLM as a second image.")
     parser.add_argument("--text", default="",
                         help="Optional user text / notes about the part.")
     script_dir = Path(__file__).resolve().parent
@@ -381,7 +439,45 @@ def main(argv=None):
     if mime_type is None:
         mime_type = "application/octet-stream"
     image_b64 = base64.b64encode(drawing_path.read_bytes()).decode("ascii")
-    base_prompt = build_prompt(principles_text, gear_text, args.text, output_dir)
+
+    # Optional outline attachment: JSON -> summarized prompt section;
+    # image -> second image sent to the LLM. The original file is
+    # always copied to the output folder for the record.
+    outline_text = ""
+    outline_image = None
+    if args.outline:
+        outline_path = Path(args.outline)
+        if not outline_path.is_file():
+            die(f"outline file not found: {outline_path}")
+        outline_suffix = outline_path.suffix or ".bin"
+        outline_copy = output_dir / f"outline_input{outline_suffix}"
+        outline_copy.write_bytes(outline_path.read_bytes())
+        outline_mime, _enc = mimetypes.guess_type(str(outline_path))
+        if outline_suffix.lower() == ".json":
+            try:
+                outline_data = json.loads(outline_path.read_text(encoding="utf-8"))
+                outline_text = summarize_outline_json(outline_data)
+                report_lines.append(
+                    f"Outline: {outline_path} (JSON, summarized for prompt, "
+                    f"full copy at {outline_copy})")
+            except (OSError, ValueError) as exc:
+                die(f"cannot parse outline JSON {outline_path}: {exc}")
+        elif (outline_mime or "").startswith("image/"):
+            outline_image = (
+                base64.b64encode(outline_path.read_bytes()).decode("ascii"),
+                outline_mime)
+            report_lines.append(
+                f"Outline: {outline_path} (image, sent to LLM as second image, "
+                f"copy at {outline_copy})")
+        else:
+            outline_text = (
+                "User-captured outline (text file, first 8000 chars):\n"
+                + outline_path.read_text(encoding="utf-8", errors="replace")[:8000])
+            report_lines.append(
+                f"Outline: {outline_path} (text, copy at {outline_copy})")
+
+    base_prompt = build_prompt(principles_text, gear_text, args.text,
+                               output_dir, outline_text)
     report_lines.append(f"Drawing: {drawing_path}")
     report_lines.append(f"Principles: {args.principles}")
     report_lines.append(f"Model: {args.model}, max_tokens: {args.max_tokens}")
@@ -437,7 +533,8 @@ def main(argv=None):
                 + "Do not change any dimension, outline, angle, or "
                 + "user-confirmed answer. Regenerate the full macro."
             )
-        messages = build_messages(prompt_text, image_b64, mime_type)
+        messages = build_messages(prompt_text, image_b64, mime_type,
+                                  outline_image=outline_image)
         try:
             response_json = call_api(api_key, args.model, args.max_tokens, messages)
         except RuntimeError as exc:
@@ -546,6 +643,30 @@ def main(argv=None):
             f"volume={verification['volume']:.4f} (reference only), "
             f"tess bbox X {verification['tess_x']}, "
             f"Y {verification['tess_y']}, Z {verification['tess_z']}.")
+        # Visual previews (best-effort, never a gate): shaded PNGs
+        # from the STEP tessellation, shown in the web UI result page.
+        # A missing matplotlib or a render failure must NOT fail the
+        # run — the .fcstd / STEP files are the result.
+        preview_iso = output_dir / "preview_iso.png"
+        preview_main = output_dir / "preview_main.png"
+        tris_path = output_dir / "tris.json"
+        render_script = Path(__file__).resolve().parent / "render_preview.py"
+        try:
+            preview_result = subprocess.run(
+                [sys.executable, str(render_script), str(tris_path),
+                 str(preview_iso), str(preview_main)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=300, text=True)
+            if preview_iso.is_file() and preview_main.is_file():
+                report_lines.append(
+                    f"Previews: {preview_iso}, {preview_main}")
+            else:
+                report_lines.append(
+                    "Previews: unavailable "
+                    f"(render exit {preview_result.returncode}, "
+                    f"output: {preview_result.stdout[-300:]})")
+        except Exception as exc:
+            report_lines.append(f"Previews: unavailable ({exc})")
         report_lines.append("RESULT: PASS")
         write_report(output_dir / "report.txt", report_lines)
         print("\n".join(report_lines))
