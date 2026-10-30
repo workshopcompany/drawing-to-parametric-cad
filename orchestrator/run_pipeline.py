@@ -65,16 +65,21 @@ MACRO_INSTRUCTION = (
     "Generate a FreeCAD macro that builds this part, with per-feature "
     "checks and diagnostic saves, following the principles. If a problem "
     "arises, guide with feature name, geometry index, exact error, cause, "
-    "and a specific question - do NOT invent dimensions."
+    "and a specific question - do NOT invent dimensions. "
+    "Safety: do NOT use subprocess, socket, urllib, requests, shutil, "
+    "eval, exec, open, os.system, os.environ, or AttachmentOffset. "
+    "For file paths, plain string concatenation or os.path.join only, "
+    "and save with doc.saveAs() / Part.export()."
 )
 
 # Safety: patterns rejected in a generated macro. The orchestrator itself
 # may use the standard library; this list applies ONLY to macro text.
+# Lesson from the Oct 29 home run (attempts 1-2 blocked before running):
+# a blanket ban on ANY "os." / "sys." is a false positive — os.path.join
+# and os.makedirs for output paths, and a bare "import sys", are benign
+# and common in LLM macros. Only dangerous uses are blocked now.
 SAFETY_PATTERNS = [
-    (r"\bimport\s+os\b", "import os"),
-    (r"\bimport\s+sys\b", "import sys"),
-    (r"\bos\.", "os attribute"),
-    (r"\bsys\.", "sys attribute"),
+    (r"\bos\.(system|popen|remove|unlink|rmdir|removedirs|rename|replace|chmod|environ|getenv)\b", "dangerous os call"),
     (r"\bsubprocess\b", "subprocess"),
     (r"\bsocket\b", "socket"),
     (r"\burllib\b", "urllib"),
@@ -531,7 +536,12 @@ def main(argv=None):
                 + last_error
                 + "\nFix ONLY the code/API error described above. "
                 + "Do not change any dimension, outline, angle, or "
-                + "user-confirmed answer. Regenerate the full macro."
+                + "user-confirmed answer. Regenerate the full macro. "
+                + "Safety reminder: do NOT use subprocess, socket, "
+                + "urllib, requests, shutil, eval, exec, open, "
+                + "os.system, os.environ, or AttachmentOffset. "
+                + "os.path.join / os.makedirs for output paths are "
+                + "allowed; save with doc.saveAs() / Part.export()."
             )
         messages = build_messages(prompt_text, image_b64, mime_type,
                                   outline_image=outline_image)
