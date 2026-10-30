@@ -63,6 +63,26 @@ the sidebar for the Korean UI, and the same link on a result page
 to switch there (`?lang=ko`). Click "English" to switch back. The
 choice travels with the form's hidden field to the result page.
 
+## Ask first (on by default) — the back-and-forth loop
+"Ask questions first" is on by default. The first run builds no
+model and only extracts questions (report says "ASK-FIRST", no
+model file, banner is "Questions pending" or "Ask-first done — no
+model yet"). Answer in the QA tab form and press Continue work, and
+only then is the model built with your answers. If new questions
+arise or the build fails during building, questions come up again
+and answering rebuilds. That is the loop. Turning ask-first off
+restores the old behaviour: build immediately, questions afterwards.
+Three reasons the old loop broke, now fixed: (1) question
+extraction only matched lines starting with "Q1:", now it also
+matches "Question 1:", "Q1.", "- Q1:" and similar forms. (2) Only
+the answers went into the next prompt; now the previous question
+list goes in too. (3) The build prompt now requires a Q-line for
+every INFERRED value, and self-fix must carry previous Q-lines
+forward. If the LLM still asks nothing, the result is a PASS —
+that is the LLM not asking, not the code hiding questions; in an
+ask-first step it writes "NO QUESTIONS" and Continue work builds
+right away.
+
 ## Answer questions and continue work (answer form on the QA tab)
 A result with questions is NOT a success. The banner says
 "Questions pending — NOT a success", and `report.txt` says

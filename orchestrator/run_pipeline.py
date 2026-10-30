@@ -66,10 +66,32 @@ MACRO_INSTRUCTION = (
     "checks and diagnostic saves, following the principles. If a problem "
     "arises, guide with feature name, geometry index, exact error, cause, "
     "and a specific question - do NOT invent dimensions. "
+    "Every dimension you are not 100% sure of from the drawing MUST be "
+    "marked INFERRED in the macro AND must have a matching Q-line "
+    "(Q1: ..., Q2: ...) in the macro header. A macro with INFERRED "
+    "values and no Q-lines is incomplete - do not submit it. If the "
+    "drawing shows a gear, knurl, thread, bore, notch, or chamfer you "
+    "cannot dimension exactly, you MUST ask about it in a Q-line, "
+    "even if you also build a provisional version. "
     "Safety: do NOT use subprocess, socket, urllib, requests, shutil, "
     "eval, exec, open, os.system, os.environ, or AttachmentOffset. "
     "For file paths, plain string concatenation or os.path.join only, "
     "and save with doc.saveAs() / Part.export()."
+)
+
+ASK_FIRST_INSTRUCTION = (
+    "ASK FIRST - do NOT write a macro, do NOT write code, do NOT build "
+    "anything yet. Examine the drawing (and outline, if any) and list "
+    "EVERYTHING that is ambiguous, undimensioned, conflicting, or "
+    "unreadable, as numbered questions, one per line, in exactly this "
+    "format: Q1: <what you provisionally read> - <what you need>. "
+    "Q2: ... Ask about every gear, knurl, thread, bore, notch, "
+    "chamfer, step, and flat you cannot dimension exactly from the "
+    "drawing. If a dimension is missing, ask - do NOT guess, do NOT "
+    "fill it with a provisional value in this step. If truly nothing "
+    "is ambiguous, write exactly one line: NO QUESTIONS. Output ONLY "
+    "the question list (or NO QUESTIONS) - no code fence, no macro, "
+    "no explanation."
 )
 
 # Safety: patterns rejected in a generated macro. The orchestrator itself
@@ -189,6 +211,17 @@ def build_prompt(principles_text, gear_text, user_text, output_dir, outline_text
         f"{output_dir / 'model.fcstd'} and the STEP export to "
         f"{output_dir / 'model.step'}."
     )
+    return "\n\n".join(parts)
+
+
+def build_ask_prompt(principles_text, user_text, outline_text=""):
+    """Ask-first prompt: questions only, no macro, no model yet."""
+    parts = [principles_text]
+    if user_text:
+        parts.append(f"User text:\n{user_text}")
+    if outline_text:
+        parts.append(outline_text)
+    parts.append(ASK_FIRST_INSTRUCTION)
     return "\n\n".join(parts)
 
 
@@ -313,28 +346,32 @@ def safety_check(macro_text):
 def extract_questions(content, macro_text):
     """Extract unanswered design questions (Q1, Q2, ...) from a response.
 
-    Looks for lines that START a question: a macro comment ("# Q1 ..."),
-    a print ("print(\\"Q1 ...\\")"), or a plain "Q1: ..." line. Inline
+    Looks for lines that START a question, after stripping markdown
+    bullets/bold, macro comments ("# Q1 ..."), and prints
+    ("print(\"Q1 ...\")"). Accepted labels: Q1, Question 1, with a
+    colon, dot, dash, or closing paren after the number. Inline
     references such as "pending Q3/Q6" are NOT questions and are
-    ignored. Returns [(number, text), ...] sorted by number, deduped.
+    ignored. Returns [(label, text), ...] sorted by number, deduped.
     """
     questions = {}
     for text in (content, macro_text):
         for line in text.splitlines():
             stripped = line.strip()
-            match = re.match(r"#\s*(Q\d+)\s*[:\-]?\s*(.+)", stripped)
-            if not match:
-                match = re.match(
-                    r'print\(\s*["\'](Q\d+)\s*[:\-]?\s*(.+?)["\']\s*\)',
-                    stripped)
-            if not match:
-                match = re.match(r"(Q\d+)\s*[:\-]\s*(.+)", stripped)
-            if not match:
+            stripped = re.sub(r"^[-*\u2022]\s+", "", stripped)
+            stripped = stripped.replace("**", "").strip()
+            m = re.match(r"#\s*(.+)", stripped)
+            if m:
+                stripped = m.group(1).strip()
+            m = re.match(r'print\(\s*["\'](.+?)["\']\s*\)', stripped)
+            if m:
+                stripped = m.group(1).strip()
+            m = re.match(r"(?:Q|Question)\s*(\d+)\s*[:.\-\)]\s*(.+)", stripped)
+            if not m:
                 continue
-            label, question = match.group(1), match.group(2).strip()
-            question = question.rstrip('")').strip()
+            label = f"Q{m.group(1)}"
+            question = m.group(2).strip().rstrip('")').strip()
             if label not in questions and len(question) > 3:
-                questions[label] = question[:200]
+                questions[label] = question[:500]
     return [(label, questions[label])
             for label in sorted(questions, key=lambda q: int(q[1:]))]
 
@@ -454,6 +491,10 @@ def parse_args(argv=None):
                         help="freecadcmd executable (default: freecadcmd in PATH).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Assemble the prompt and check paths only; do NOT call the API.")
+    parser.add_argument("--ask-first", action="store_true",
+                        help="Ask questions FIRST and build nothing yet: "
+                        "the LLM lists Q1... questions only, no macro, "
+                        "no model. Answer via the web UI, then build.")
     return parser.parse_args(argv)
 
 
@@ -521,6 +562,13 @@ def main(argv=None):
 
     base_prompt = build_prompt(principles_text, gear_text, args.text,
                                output_dir, outline_text)
+    if args.ask_first:
+        # Ask-first replaces the build prompt entirely: questions
+        # only, no macro, no model. The build happens on the next
+        # run, with the answers as --text.
+        base_prompt = build_ask_prompt(principles_text, args.text,
+                                       outline_text)
+        report_lines.append("Mode: ASK-FIRST - questions only, no model yet.")
     report_lines.append(f"Drawing: {drawing_path}")
     report_lines.append(f"Principles: {args.principles}")
     report_lines.append(f"Model: {args.model}, max_tokens: {args.max_tokens}")
@@ -550,6 +598,66 @@ def main(argv=None):
             "This script never asks for the key in chat and never "
             "prints it.")
 
+    if args.ask_first:
+        # Ask-first: one API call, questions only, NO freecadcmd
+        # check (nothing is built, so FreeCAD is not needed yet),
+        # NO macro, NO model, NO verification. If a problem arises
+        # later during the build run, that run's questions are
+        # surfaced the same way and the user is asked again.
+        messages = build_messages(base_prompt, image_b64, mime_type,
+                                  outline_image=outline_image)
+        try:
+            response_json = call_api(api_key, args.model,
+                                     args.max_tokens, messages)
+        except RuntimeError as exc:
+            report_lines.append(f"RESULT: FAIL - ask-first API error: {exc}")
+            write_report(output_dir / "report.txt", report_lines)
+            print("\n".join(report_lines))
+            return 1
+        raw_path = output_dir / "raw_response.txt"
+        raw_path.write_text(json.dumps(response_json, indent=2,
+                                       ensure_ascii=False),
+                            encoding="utf-8")
+        try:
+            content = extract_content(response_json)
+        except RuntimeError as exc:
+            report_lines.append(f"RESULT: FAIL - ask-first response error: {exc}")
+            write_report(output_dir / "report.txt", report_lines)
+            print("\n".join(report_lines))
+            return 1
+        questions = extract_questions(content, "")
+        if questions:
+            questions_text = "\n".join(f"{label}: {text}"
+                                       for label, text in questions)
+            (output_dir / "questions.txt").write_text(
+                questions_text + "\n", encoding="utf-8")
+            report_lines.append(
+                "Questions (unanswered, from ask-first step): "
+                + "; ".join(f"{label}: {text}"
+                            for label, text in questions))
+            report_lines.append(
+                "RESULT: QUESTIONS PENDING (ask-first - no model built "
+                "yet, answer questions.txt and continue)")
+        elif "NO QUESTIONS" in content.upper():
+            report_lines.append(
+                "RESULT: ASK-FIRST NO QUESTIONS (no model built yet, "
+                "press Continue work to build)")
+        else:
+            # Unformatted questions: do NOT silently pass. Keep the
+            # whole answer as questions so the user can answer it.
+            fallback = content.strip()[:4000]
+            (output_dir / "questions.txt").write_text(
+                f"Q1: {fallback}\n", encoding="utf-8")
+            report_lines.append(
+                "Questions (unanswered, from ask-first step, "
+                "unformatted): " + fallback.replace("\n", " ")[:500])
+            report_lines.append(
+                "RESULT: QUESTIONS PENDING (ask-first - no model built "
+                "yet, answer questions.txt and continue)")
+        write_report(output_dir / "report.txt", report_lines)
+        print("\n".join(report_lines))
+        return 0
+
     if shutil.which(args.freecadcmd) is None and not Path(args.freecadcmd).is_file():
         die(f"freecadcmd not found: {args.freecadcmd} "
             "(install FreeCAD 1.1.4 or pass --freecadcmd). "
@@ -574,7 +682,10 @@ def main(argv=None):
                 + last_error
                 + "\nFix ONLY the code/API error described above. "
                 + "Do not change any dimension, outline, angle, or "
-                + "user-confirmed answer. Regenerate the full macro. "
+                + "user-confirmed answer. Do not drop any Q-lines or "
+                + "question blocks from the previous attempt; carry "
+                + "all unanswered questions forward in the new macro "
+                + "header. Regenerate the full macro. "
                 + "Safety reminder: do NOT use subprocess, socket, "
                 + "urllib, requests, shutil, eval, exec, open, "
                 + "os.system, os.environ, or AttachmentOffset. "

@@ -220,6 +220,16 @@ S = {
                           "(answer and continue, see questions.txt)",
                           "❓ 질문 대기 중 — 성공이 아닙니다 "
                           "(답변하고 계속 작업하세요, questions.txt 확인)"),
+    "askfirst_banner": ("⏳ Ask-first done — no model yet, press "
+                        "Continue work to build",
+                        "⏳ 질문 먼저 완료 — 아직 모델이 없습니다, "
+                        "계속 작업을 눌러 만드세요"),
+    "answer_askfirst_note": ("No model was built yet in this result "
+                             "(ask-first step) — Continue work will "
+                             "build it with your answers.",
+                             "이 결과에는 아직 모델이 없습니다 (질문 먼저 "
+                             "단계) — 계속 작업을 누르면 답을 반영해 "
+                             "만듭니다."),
     "result_sidebar": ("Result", "실행 결과"),
     "result_heading": ("Result", "실행 결과"),
     "back_form": ("← Back to form", "← 폼으로 돌아가기"),
@@ -429,6 +439,7 @@ def form_page_ko():
     <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> 기어 부품 (체크 시에만 기어 참조 포함)</label>
+    <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> 질문 먼저 (답하기 전에는 모델을 만들지 않음)</label>
     <label for="api_key">Meta API 키</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
     <p class="note">키는 저장되지 않고 이번 실행에만 사용. 비우면 레포 폴더 .env 키 사용.</p>
@@ -565,6 +576,7 @@ def form_page_en():
     <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (assemble the prompt only)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> Gear part (gear reference included only when checked)</label>
+    <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> Ask questions first (no model until you answer)</label>
     <label for="api_key">Meta API key</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
     <p class="note">Key is not stored, used only for this run. Empty means use the repo folder .env key.</p>
@@ -980,6 +992,10 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # an older result folder shows the same banner.
     if questions_text.strip():
         banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
+    elif "ASK-FIRST" in report_text and not (output_dir / "model.fcstd").is_file():
+        # Ask-first step with no questions: not a success either,
+        # just ready to build. No model exists yet.
+        banner = (f"<span class=\"status-warn\">{tr(lang, 'askfirst_banner')}</span>")
     elif returncode == 0 and "provisional" in report_text:
         # Old results (pre-QUESTIONS-PENDING) with a provisional PASS.
         banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
@@ -999,9 +1015,13 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
         gear_checked = ("checked" if "Gear reference: included"
                         in report_text else "")
         dir_query = html.escape(str(output_dir), quote=True)
+        askfirst_note = ""
+        if not (output_dir / "model.fcstd").is_file():
+            askfirst_note = (f"<p class=\"note\">{tr(lang, 'answer_askfirst_note')}</p>")
         answer_form = f"""
       <div class="card"><h3>{tr(lang, 'answer_title')}</h3>
       <p class="note">{tr(lang, 'answer_note')}</p>
+      {askfirst_note}
       <form action="/answer" method="post" enctype="multipart/form-data">
       <input type="hidden" name="dir" value="{dir_query}">
       <input type="hidden" name="lang" value="{lang}">
@@ -1338,7 +1358,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_html(400, data)
                 return
             answers = fields.get("answers", "").strip()
-            if not answers:
+            # Ask-first with NO questions: Continue work means "build
+            # now", so empty answers are allowed in that one case.
+            prev_report = ""
+            prev_report_path = prev_dir / "report.txt"
+            if prev_report_path.is_file():
+                prev_report = prev_report_path.read_text(
+                    encoding="utf-8", errors="replace")
+            prev_questions = ""
+            prev_questions_path = prev_dir / "questions.txt"
+            if prev_questions_path.is_file():
+                prev_questions = prev_questions_path.read_text(
+                    encoding="utf-8", errors="replace").strip()
+            askfirst_no_questions = (
+                "ASK-FIRST" in prev_report and not prev_questions
+                and not (prev_dir / "model.fcstd").is_file())
+            if not answers and not askfirst_no_questions:
                 data = error_page(tr(lang, "err_answers_empty"), lang=lang)
                 self._send_html(400, data)
                 return
@@ -1357,10 +1392,23 @@ class Handler(BaseHTTPRequestHandler):
             # resolve_run_output_dir() timestamps this, since the
             # previous folder already holds a report/model.
             fields["output_dir"] = str(prev_dir)
-            fields["notes"] = (
-                "Answers to the previous run's questions:\n"
-                + answers
-                + f"\n(Previous run folder: {prev_dir.name})")
+            # Carry the previous questions as context, not just the
+            # answers: without them the next run can re-ask the same
+            # questions or drop features the answers settled.
+            if prev_questions:
+                fields["notes"] = (
+                    "Previous questions:\n" + prev_questions
+                    + "\nAnswers to the previous run's questions:\n"
+                    + answers
+                    + f"\n(Previous run folder: {prev_dir.name})")
+            elif answers:
+                fields["notes"] = (
+                    "Answers to the previous run's questions:\n"
+                    + answers
+                    + f"\n(Previous run folder: {prev_dir.name})")
+            else:
+                fields["notes"] = (
+                    "Ask-first step asked no questions. Build now.")
 
         dry_run = fields.get("dry_run") == "on"
         api_key = fields.get("api_key", "")
@@ -1370,11 +1418,13 @@ class Handler(BaseHTTPRequestHandler):
             data = error_page(tr(lang, "err_key"), lang=lang)
             self._send_html(400, data)
             return
-        # Pre-flight: freecadcmd must be findable before any API call.
-        # run_pipeline.py checks this too, but the UI stops earlier
-        # with a Korean explanation, so no API credit is spent.
+        # Pre-flight: freecadcmd must be findable before any API call,
+        # EXCEPT ask-first runs (nothing is built, so FreeCAD is not
+        # needed yet). run_pipeline.py checks this too, but the UI
+        # stops earlier with an explanation, so no API credit is spent.
         freecadcmd_value = fields.get("freecadcmd", "freecadcmd") or "freecadcmd"
-        if not dry_run and not freecadcmd_found(freecadcmd_value):
+        ask_first = fields.get("ask_first") == "on"
+        if not dry_run and not ask_first and not freecadcmd_found(freecadcmd_value):
             data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
             self._send_html(400, data)
             return
@@ -1408,6 +1458,8 @@ class Handler(BaseHTTPRequestHandler):
             command += ["--text", notes]
         if fields.get("gear") == "on":
             command.append("--gear")
+        if ask_first:
+            command.append("--ask-first")
         if dry_run:
             command.append("--dry-run")
 

@@ -75,6 +75,17 @@ run itself does not fail, and the report says "Previews: unavailable".
 - Design/dimension questions are never self-fixed: the run stops
   instead of inventing a dimension. Answer the question and rerun.
 
+## Ask first (--ask-first)
+With `--ask-first`, the first run builds no model and only extracts
+questions. The LLM is told "no macro, no code, questions only in
+Q1: ... format". With questions, the run leaves questions.txt +
+"RESULT: QUESTIONS PENDING (ask-first ...)"; with none, it leaves
+"RESULT: ASK-FIRST NO QUESTIONS". The freecadcmd check is skipped
+in this step (nothing is built). Answers go into the next run as
+`--text` via the web UI Continue work button. If new questions
+arise during a build, that run is QUESTIONS PENDING too, and
+answering rebuilds.
+
 ## Questions and provisional results
 - If the macro asks Q1–Q9 questions, they are extracted to
   `<output-dir>/questions.txt` and listed in `report.txt`, and shown

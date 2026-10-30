@@ -35,6 +35,16 @@ python3 run_pipeline.py --drawing my_drawing.png --text "부품 설명" --output
   기하 번호, 정확한 오류, 원인, 질문/대안을 적어.
 - 설계/치수 질문이 나오면 치수를 지어내지 않고 멈춰. 답을 주고 다시 실행해.
 
+## 질문 먼저 (--ask-first)
+`--ask-first`를 주면 첫 실행은 모델을 만들지 않고 질문만 뽑습니다.
+LLM에 “매크로/코드 금지, Q1: … 형식으로 질문만”을 지시하고,
+질문이 있으면 questions.txt + “RESULT: QUESTIONS PENDING
+(ask-first …)”를, 질문이 없으면 “RESULT: ASK-FIRST NO QUESTIONS”를
+남깁니다. freecadcmd 검사는 이 단계에서는 건너뜁니다 (만드는 게
+없으니까). 답은 웹 UI 계속 작업으로 `--text`에 넣어 다음 실행에서
+만듭니다. 만드는 도중 새 질문이 생기면 그 실행도 QUESTIONS
+PENDING이 되고, 답하면 다시 만듭니다.
+
 ## 질문과 임시 결과
 - 매크로에 Q1~Q9 같은 질문이 있으면, `<output-dir>/questions.txt`로
   뽑히고 report.txt에도 적혀. 결과 페이지 QA 탭에서 바로 보여.
