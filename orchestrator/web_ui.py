@@ -337,11 +337,17 @@ S = {
                              "then use its Continue work form to keep "
                              "working from there. The list shows folders "
                              "next to the server; type any other folder "
-                             "path (absolute) in the box.",
+                             "path (absolute) in the box. The folder must "
+                             "already hold a result. To start fresh in a "
+                             "new folder, use the main form's output "
+                             "folder field.",
                              "이전 결과 폴더를 골라 열면, 그 폴더의 계속 "
                              "작업 폼으로 거기서부터 이어서 작업할 수 "
                              "있습니다. 목록은 서버 옆 폴더들이고, 다른 "
-                             "곳에 있는 폴더는 절대 경로를 직접 입력하세요."),
+                             "곳에 있는 폴더는 절대 경로를 직접 입력하세요. "
+                             "폴더에는 이미 결과가 있어야 합니다. 새 "
+                             "폴더에서 새로 시작하려면 메인 폼의 출력 "
+                             "폴더란을 사용하세요."),
     "continue_folder_pick": ("Open selected folder", "선택한 폴더 열기"),
     "continue_folder_path": ("Or type a folder path (absolute)",
                              "또는 폴더 경로 직접 입력 (절대 경로)"),
@@ -437,6 +443,28 @@ S = {
                     "도면 이미지를 선택하세요."),
     "err_result_dir": ("Cannot open the result folder.",
                        "결과 폴더를 열 수 없습니다."),
+    "err_result_empty": ("No folder was given. Pick a folder from the "
+                         "list, or type a folder path in the box.",
+                         "폴더가 지정되지 않았습니다. 목록에서 폴더를 "
+                         "고르거나 경로 입력란에 폴더 경로를 입력하세요."),
+    "err_result_missing": ("That folder does not exist. Check the path. "
+                           "To start fresh in a new folder, use the main "
+                           "form's output folder field instead — this "
+                           "picker only opens folders that already hold "
+                           "a result.",
+                           "해당 폴더가 없습니다. 경로를 확인하세요. 새 "
+                           "폴더에서 새로 시작하려면 이 선택기가 아니라 "
+                           "메인 폼의 출력 폴더란에 새 폴더를 지정하세요. "
+                           "이 선택기는 이미 결과가 있는 폴더만 엽니다."),
+    "err_result_nofiles": ("That folder holds no result files "
+                           "(report.txt, guidance.txt, or model.step). "
+                           "Pick an existing result folder, or start "
+                           "fresh from the main form's output folder "
+                           "field.",
+                           "해당 폴더에 결과 파일(report.txt, "
+                           "guidance.txt, model.step 중 하나)이 없어서 열 "
+                           "수 없습니다. 기존 결과 폴더를 고르거나, 메인 "
+                           "폼의 출력 폴더란에서 새로 시작하세요."),
     "err_view_file": ("This file cannot be viewed in the browser.",
                       "브라우저에서 볼 수 없는 파일입니다."),
     "err_download_path": ("Cannot download this path.",
@@ -1053,7 +1081,7 @@ def recent_html(lang="en"):
         f"<form action=\"/result\" method=\"get\">"
         f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
         f"<label>{tr(lang, 'continue_folder_path')}</label>"
-        f"<input type=\"text\" name=\"dir\" "
+        f"<input type=\"text\" name=\"dir\" required "
         f"placeholder=\"E:\\drawing_to_parametric_cad_orchestrator\\my_run_output_20261030_...\">"
         f"<button type=\"submit\">{tr(lang, 'continue_folder_open')}</button>"
         f"</form>")
@@ -1400,14 +1428,21 @@ class Handler(BaseHTTPRequestHandler):
             # ?dir=<absolute path> only; resolved and must hold a report.
             query = urllib.parse.parse_qs(parsed.query)
             raw_dir = query.get("dir", [""])[0]
-            output_dir = Path(raw_dir).resolve() if raw_dir else None
-            ok = (output_dir is not None and output_dir.is_dir()
-                  and ((output_dir / "report.txt").is_file()
-                       or (output_dir / "guidance.txt").is_file()
-                       or (output_dir / "model.step").is_file()))
             lang = pick_lang(query.get("lang", [""])[0])
-            if not ok:
-                self._send_html(400, error_page(tr(lang, "err_result_dir"), lang=lang))
+            # Tell the user WHY it cannot open (Oct 30: a bare
+            # "Cannot open the result folder" hid an empty path
+            # submission and a not-yet-existing new folder).
+            if not raw_dir:
+                self._send_html(400, error_page(tr(lang, "err_result_empty"), lang=lang))
+                return
+            output_dir = Path(raw_dir).resolve()
+            if not output_dir.is_dir():
+                self._send_html(400, error_page(tr(lang, "err_result_missing"), lang=lang))
+                return
+            if not ((output_dir / "report.txt").is_file()
+                    or (output_dir / "guidance.txt").is_file()
+                    or (output_dir / "model.step").is_file()):
+                self._send_html(400, error_page(tr(lang, "err_result_nofiles"), lang=lang))
                 return
             # Banner keys off questions.txt, so reopened results show
             # QUESTIONS even when the stored report says PASS.
