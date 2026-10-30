@@ -602,7 +602,7 @@ def form_page_ko():
         <textarea id="notes" name="notes" placeholder="예: 베이스 D2.8, 요크 폭 4.8 ..."></textarea>
         <p class="note">치수를 지어내지 않습니다. 모호하면 멈추고 guidance.txt에 질문을 남깁니다.</p></div>
       </div>
-      {form_gallery_html("ko")}
+      {recent_html("ko")}
     </div>
     <div class="tab-panel" id="t2">
       <div class="grid2">
@@ -627,6 +627,7 @@ def form_page_ko():
 </div>
 </form>
 {picker_html("ko")}
+{sample_gallery_html("ko")}
 <script>
 (function(){{
   function showFile(inputId, imgIds){{
@@ -740,7 +741,7 @@ def form_page_en():
         <textarea id="notes" name="notes" placeholder="e.g. base D2.8, yoke width 4.8 ..."></textarea>
         <p class="note">Dimensions are never invented. When something is unclear, the run stops and leaves the questions in guidance.txt.</p></div>
       </div>
-      {form_gallery_html("en")}
+      {recent_html("en")}
     </div>
     <div class="tab-panel" id="t2">
       <div class="grid2">
@@ -765,6 +766,7 @@ def form_page_en():
 </div>
 </form>
 {picker_html("en")}
+{sample_gallery_html("en")}
 <script>
 (function(){{
   function showFile(inputId, imgIds){{
@@ -1128,11 +1130,6 @@ def picker_html(lang="en"):
     return (f"<div class=\"card\"><h3>&#128193; {tr(lang, 'continue_folder_title')}</h3>"
             f"<p class=\"note\">{tr(lang, 'continue_folder_note')}</p>"
             f"{picker}</div>")
-
-
-def form_gallery_html(lang="en"):
-    """t1 bottom: recent runs + bundled samples (server-side, no JS needed)."""
-    return recent_html(lang) + sample_gallery_html(lang)
 
 
 def viewer_html(output_dir, lang="en"):
