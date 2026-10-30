@@ -384,6 +384,16 @@ S = {
     "dry_label": ("dry-run (assemble the prompt only)",
                   "dry-run (프롬프트 조립만 확인)"),
     "continue_button": ("▶ Continue work", "▶ 계속 작업"),
+    "continue_button_note": ("Continue work starts a fresh run from "
+                             "scratch using this work's history "
+                             "(drawing, outline, Q&A history, numbered "
+                             "dimensions). It does not patch the old "
+                             "model — a new model is built in a new "
+                             "timestamped folder.",
+                             "계속 작업은 이 작업의 히스토리(도면, 윤곽, "
+                             "Q&A 내역, 번호 도면)를 가지고 처음부터 새로 "
+                             "만드는 실행입니다. 이전 모델을 고치는 게 "
+                             "아니라 새 폴더에 새 모델을 만듭니다."),
     "report_title": ("report.txt", "report.txt"),
     "report_none": ("(none)", "(없음)"),
     "guidance_title": ("guidance.txt", "guidance.txt"),
@@ -1170,6 +1180,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <input type="password" id="api_key_answer" name="api_key" autocomplete="off">
       <p class="note">{tr(lang, 'key_note')}</p>
       <button type="submit">{tr(lang, 'continue_button')}</button>
+      <p class="note">{tr(lang, 'continue_button_note')}</p>
       </form></div>"""
 
     def view_link(name):
