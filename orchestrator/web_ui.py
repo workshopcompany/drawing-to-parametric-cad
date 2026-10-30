@@ -12,7 +12,8 @@ Then open http://127.0.0.1:8000/ in a browser.
 Optional port: python web_ui.py --port 8001
 
 What it does:
-  1. Shows one Korean form: drawing upload, part notes, gear checkbox,
+  1. Shows one form (English by default, Korean via ?lang=ko):
+     drawing upload, part notes, gear checkbox,
      output folder, dry-run checkbox, freecadcmd, Meta API key
      (password field).
   2. On submit, first runs pre-flight checks (key present unless
@@ -140,7 +141,7 @@ PAGE_CSS = (
     "font-family:'IBM Plex Mono',monospace;}"
 )
 
-FOOTER = (
+FOOTER_KO = (
     "<hr><p class=\"note\">실행 방법 — Windows: <code>python web_ui.py</code> / "
     "Mac·Linux: <code>python3 web_ui.py</code> — 그 뒤 브라우저에서 "
     "http://127.0.0.1:8000/ 을 여세요.<br>"
@@ -148,6 +149,211 @@ FOOTER = (
     "FreeCAD도 대신하지 않습니다. FreeCAD 1.1.4가 필요하고, freecadcmd가 PATH에 "
     "없으면 실행 설정 칸에 전체 경로를 입력하세요.<br>"
     "스타일 참조: mp3d-cad-system 대시보드(다크 테마 · 사이드바 · 2단 카드 · 탭 결과).</p>"
+)
+
+
+
+# ---- Language: English is the default; Korean via ?lang=ko ----
+def pick_lang(value):
+    """'ko' only when explicitly asked; anything else is English."""
+    return "ko" if value == "ko" else "en"
+
+
+S = {
+    # recent runs / samples / viewer
+    "recent_title": ("Recent runs (open without rerunning)",
+                      "최근 실행 결과 바로 보기"),
+    "recent_note": ("Open a previous result without rerunning. "
+                    "New results appear here too.",
+                    "재실행 없이 눈으로 확인. 새 결과도 아래 목록에 바로 뜹니다."),
+    "recent_empty": ("No recent runs yet. Pick a drawing above and run.",
+                     "최근 실행 기록이 없습니다. 위에서 도면을 골라 실행하세요."),
+    "th_folder": ("Output folder", "출력 폴더"),
+    "th_status": ("Status", "상태"),
+    "th_open": ("Open", "바로 보기"),
+    "open_link": ("Open", "열기"),
+    "outline_note1": ("To draw an outline yourself, open the ",
+                      "윤곽을 직접 그리고 싶으면 "),
+    "outline_note2": (" -> download JSON -> attach it on the left.",
+                      " → JSON 다운 → 왼쪽 윤곽 첨부에 올리세요."),
+    "sample_title": ("Bundled sample drawings (click for full size)",
+                     "번들 샘플 도면 (클릭하면 원본 크기)"),
+    "sample_empty": ("No samples in the image/ folder.",
+                     "image/ 폴더에 샘플이 없습니다."),
+    "sample_note": ("Drawings in the image/ folder. They are server "
+                   "files, so you can look without uploading.",
+                   "image/ 폴더에 들어있는 도면입니다. 서버 파일이라 "
+                   "업로드 없이 바로 눈으로 확인됩니다."),
+    "sample_original": ("Full size", "원본 크기"),
+    "sample_use_note": ("To use it as the drawing for a run, pick "
+                        "this file on the left.",
+                        "실행 시 도면으로 쓰려면 이 파일을 왼쪽에서 직접 고르세요."),
+    "viewer_title": ("Interactive 3D viewer (tris.json)",
+                     "돌려보는 3D 뷰어 (tris.json)"),
+    "viewer_note": ("Drag to rotate, wheel to zoom, buttons to change "
+                   "view. No CDN, runs on this page only. "
+                   "{n} facets. The PNG below is a still image of "
+                   "the same shape.",
+                   "드래그 회전 · 휠 줌 · 버튼 시점 전환. CDN 없이 이 페이지 "
+                   "안에서만 돕니다. facet {n}개 · 아래 PNG는 같은 형상의 "
+                   "정지 이미지입니다."),
+    "viewer_none": ("No viewer ({why} See the PNG previews below.)",
+                    "뷰어 없음 ({why} 아래 PNG 프리뷰를 보세요)."),
+    "viewer_missing": ("no <code>tris.json</code> (not a freecadcmd result).",
+                       "<code>tris.json</code> 없음 (freecadcmd 결과가 아닙니다)."),
+    "viewer_toolarge": ("<code>tris.json</code> over 8MB — skipped to "
+                        "protect the browser.",
+                        "<code>tris.json</code> 8MB 초과 — 브라우저 보호를 위해 뷰어 생략."),
+    "viewer_scope": ("path outside the folder.", "범위 밖 경로."),
+    "viewer_badshape": ("<code>tris.json</code> format error.",
+                        "<code>tris.json</code> 형식 오류."),
+    "viewer_loading": ("Loading…", "로딩 중…"),
+    "view_iso": ("ISO", "ISO"),
+    "view_main": ("Front (large face)", "정면(큰 면)"),
+    "view_top": ("Top", "위"),
+    "view_side": ("Side", "옆"),
+    # result page
+    "success": ("✅ Success (exit code 0)", "✅ 성공 (종료 코드 0)"),
+    "failure": ("❌ Failed (exit code {code})",
+                "❌ 실패 (종료 코드 {code})"),
+    "questions_pending": ("❓ Questions pending — NOT a success "
+                          "(answer and continue, see questions.txt)",
+                          "❓ 질문 대기 중 — 성공이 아닙니다 "
+                          "(답변하고 계속 작업하세요, questions.txt 확인)"),
+    "result_sidebar": ("Result", "실행 결과"),
+    "result_heading": ("Result", "실행 결과"),
+    "back_form": ("← Back to form", "← 폼으로 돌아가기"),
+    "output_folder": ("Output folder", "출력 폴더"),
+    "pill_fcstd": ("Main .fcstd", ".fcstd 본체"),
+    "pill_previews": ("Previews {n}", "프리뷰 {n}장"),
+    "tab_drawing": ("Drawing recognition", "도면 인식"),
+    "tab_params": ("Parameters & 3D", "파라미터 & 3D"),
+    "tab_export": ("FreeCAD export", "FreeCAD 내보내기"),
+    "tab_qa": ("QA log", "QA 로그"),
+    "input_title": ("Original / input images",
+                    "원본 / 입력 이미지"),
+    "input_note": ("Shows <code>input_drawing.*</code> / "
+                   "<code>input_outline.*</code> from the output folder "
+                   "right in the browser.",
+                   "출력 폴더의 <code>input_drawing.*</code> / "
+                   "<code>input_outline.*</code> 을 브라우저에서 바로 봅니다."),
+    "input_caption": ("Input drawing / outline (browser view)",
+                      "입력 도면 / 윤곽 (브라우저 보기)"),
+    "input_none": ("No input images.", "입력 이미지가 없습니다."),
+    "preview_caption": ("Shaded preview from STEP tessellation — "
+                        "for shape checking",
+                        "STEP 테셀레이션 음영 프리뷰 — 형상 확인용"),
+    "preview_none": ("No result previews (render failed — check "
+                     ".fcstd / STEP in the file list above).",
+                     "결과 프리뷰가 없습니다 (렌더 실패 — .fcstd / STEP 파일 "
+                     "자체는 위 목록을 확인)."),
+    "files_title": ("Output files", "출력 파일"),
+    "th_file": ("File", "파일"),
+    "th_bytes": ("bytes", "bytes"),
+    "th_link": ("Links", "링크"),
+    "download": ("Download", "다운로드"),
+    "view_link": ("View", "보기"),
+    "questions_title": ("questions.txt (unanswered questions)",
+                        "questions.txt (미답변 질문)"),
+    "questions_none": ("(None — this macro asked no questions)",
+                       "(없음 — 이번 매크로에 질문이 없습니다)"),
+    "questions_note": ("Questions taken from the macro comments/output. "
+                       "This result was built with provisional values, "
+                       "so answer and continue below.",
+                       "매크로 주석/출력에서 뽑은 질문입니다. 임시값으로 만든 "
+                       "결과라면, 답을 주고 다시 실행하세요."),
+    "answer_title": ("✏️ Answer questions and continue work",
+                    "✏️ 질문에 답하고 계속 작업"),
+    "answer_note": ("Write your answers below and press Continue work: "
+                    "the drawing/outline are taken automatically from "
+                    "this result, and a new run starts with your "
+                    "answers reflected. This is a fresh run from "
+                    "scratch, not a patch to the old macro. Output "
+                    "goes to a new timestamped folder. Previous part "
+                    "notes are NOT carried over, so include anything "
+                    "still needed in the answers.",
+                    "아래에 답을 적고 계속 작업을 누르면, 도면/윤곽은 이 "
+                    "결과에서 자동으로 가져오고 답이 반영된 새 실행이 "
+                    "시작됩니다. 이전 매크로를 이어서 고치는 게 아니라, "
+                    "처음부터 새로 만드는 실행입니다. 출력은 시간 붙은 "
+                    "새 폴더에 생깁니다. 이전 부품 설명은 자동으로 안 "
+                    "넘어가니, 필요하면 답변에 같이 적으세요."),
+    "answer_label": ("Answers (one per question)",
+                     "답변 (질문별로 적으세요)"),
+    "key_note": ("Key is not stored, used only for this run. Empty "
+                 "means use the repo folder .env key.",
+                 "키는 저장되지 않고 이번 실행에만 사용. 비우면 레포 폴더 "
+                 ".env 키 사용."),
+    "gear_label": ("Gear part", "기어 부품"),
+    "dry_label": ("dry-run (assemble the prompt only)",
+                  "dry-run (프롬프트 조립만 확인)"),
+    "continue_button": ("▶ Continue work", "▶ 계속 작업"),
+    "report_title": ("report.txt", "report.txt"),
+    "report_none": ("(none)", "(없음)"),
+    "guidance_title": ("guidance.txt", "guidance.txt"),
+    "guidance_none": ("(none — not created on success)",
+                      "(없음 — 성공 시 생기지 않습니다)"),
+    "log_title": ("Run log (tail)", "실행 로그 (끝부분)"),
+    "log_none": ("(none)", "(없음)"),
+    "click_full": (" Click for full size in a new tab.",
+                   " 클릭하면 원본 크기로 새 탭에 열립니다."),
+    # error page
+    "error_heading": ("Error", "오류"),
+    "error_back": ("← Back to form", "← 폼으로 돌아가기"),
+    # POST errors
+    "err_form": ("Bad form format. Submit from the form again.",
+                 "폼 형식이 올바르지 않습니다. 폼에서 다시 제출하세요."),
+    "err_parse": ("Upload parsing failed. Try again.",
+                  "업로드 파싱에 실패했습니다. 다시 제출하세요."),
+    "err_prev_dir": ("Previous result folder not found.",
+                     "이전 결과 폴더를 찾을 수 없습니다."),
+    "err_answers_empty": ("Write your answers first.",
+                          "답변을 입력하세요."),
+    "err_prev_no_drawing": ("No drawing (input_drawing.*) in the "
+                            "previous result.",
+                            "이전 결과에 도면(input_drawing.*)이 없습니다."),
+    "err_key": ("Enter an API key, pick dry-run, or make a .env file "
+                "in the repo folder.",
+                "API 키를 입력하거나, dry-run을 선택하거나, "
+                "레포 폴더에 .env 파일을 만드세요."),
+    "err_freecadcmd": ("freecadcmd not found. Check FreeCAD 1.1.4 is "
+                       "installed and enter its full path in the "
+                       "freecadcmd box. Windows example: "
+                       "C:\\Program Files\\FreeCAD 1.1.4\\bin\\freecadcmd.exe "
+                       "(depends on the install folder). No API call "
+                       "was made at this step.",
+                       "freecadcmd를 찾을 수 없습니다. FreeCAD 1.1.4가 설치돼 있는지 "
+                       "확인하고, freecadcmd 칸에 전체 경로를 입력하세요. "
+                       "Windows 예: C:\\Program Files\\FreeCAD 1.1.4\\bin\\freecadcmd.exe "
+                       "(설치 폴더에 따라 다릅니다). 이 단계에서 API는 호출되지 "
+                       "않았습니다."),
+    "err_drawing": ("Pick a drawing image.",
+                    "도면 이미지를 선택하세요."),
+    "err_result_dir": ("Cannot open the result folder.",
+                       "결과 폴더를 열 수 없습니다."),
+    "err_view_file": ("This file cannot be viewed in the browser.",
+                      "브라우저에서 볼 수 없는 파일입니다."),
+    "err_download_path": ("Cannot download this path.",
+                          "다운로드할 수 없는 경로입니다."),
+}
+
+
+def tr(lang, key, **kw):
+    """Translate key; lang 'ko' picks Korean, anything else English."""
+    pair = S.get(key, ("", ""))
+    text = pair[1] if lang == "ko" else pair[0]
+    return text.format(**kw) if kw else text
+
+
+FOOTER_EN = (
+    "<hr><p class=\"note\">How to run — Windows: <code>python web_ui.py</code> / "
+    "Mac·Linux: <code>python3 web_ui.py</code> — then open "
+    "http://127.0.0.1:8000/ in a browser.<br>"
+    "This UI runs only on your PC (127.0.0.1) and does not let Muse control "
+    "this PC. It does not replace FreeCAD. FreeCAD 1.1.4 is required; if "
+    "freecadcmd is not in PATH, enter its full path in the run settings box.<br>"
+    "Style reference: mp3d-cad-system dashboard (dark theme · sidebar · "
+    "2-column cards · tabbed results).</p>"
 )
 
 
@@ -182,24 +388,26 @@ def freecadcmd_found(value):
     return shutil.which(value) is not None
 
 
-def page(title, body):
+def page(title, body, lang="en"):
     return (
-        "<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\">"
+        f"<!DOCTYPE html><html lang=\"{lang}\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         f"<title>{html.escape(title)}</title>"
         f"<style>{PAGE_CSS}</style></head><body>"
-        f"{body}{FOOTER}</body></html>"
+        f"{body}{(FOOTER_KO if lang == 'ko' else FOOTER_EN)}</body></html>"
     ).encode("utf-8")
 
 
-def form_page():
+def form_page_ko():
     status = ("있음" if dotenv_key_present()
               else "없음 (키 칸에 입력하거나, 레포 폴더에 .env 파일을 만드세요)")
     body = f"""
 <form action="/run" method="post" enctype="multipart/form-data" id="runForm">
+<input type="hidden" name="lang" value="ko">
 <div class="layout">
   <div class="sidebar">
     <h2>&#11042; Drawing&rarr;CAD</h2>
+    <p class="note"><a href="/?lang=en">English</a> · 한국어</p>
     <p class="sub">orchestrator v0.1 &middot; localhost only</p>
     <hr>
     <h3 style="font-size:14px;">&#128193; 파일 열기</h3>
@@ -250,7 +458,7 @@ def form_page():
         <textarea id="notes" name="notes" placeholder="예: 베이스 D2.8, 요크 폭 4.8 ..."></textarea>
         <p class="note">치수를 지어내지 않습니다. 모호하면 멈추고 guidance.txt에 질문을 남깁니다.</p></div>
       </div>
-      {form_gallery_html()}
+      {form_gallery_html("ko")}
     </div>
     <div class="tab-panel" id="t2">
       <div class="grid2">
@@ -323,17 +531,158 @@ def form_page():
 }})();
 </script>
 """
-    return page("Drawing-to-Parametric-CAD", body)
+    return page("Drawing-to-Parametric-CAD", body, lang="ko")
 
 
-def error_page(message):
+def form_page_en():
+    status = ("present" if dotenv_key_present()
+              else "absent (enter it in the key box, or make a .env file in the repo folder)")
+    body = f"""
+<form action="/run" method="post" enctype="multipart/form-data" id="runForm">
+<input type="hidden" name="lang" value="en">
+<div class="layout">
+  <div class="sidebar">
+    <h2>&#11042; Drawing&rarr;CAD</h2>
+    <p class="note">English · <a href="/?lang=ko">한국어</a></p>
+    <p class="sub">orchestrator v0.1 &middot; localhost only</p>
+    <hr>
+    <h3 style="font-size:14px;">&#128193; Open files</h3>
+    <label for="drawing">Drawing image (PNG/JPG)</label>
+    <input type="file" id="drawing" name="drawing" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp" required>
+    <div class="drop-hint">PDF is not supported yet. Convert a PDF drawing to an image (PNG/JPG) first.</div>
+    <div class="drop-hint">Once you pick a file, a preview appears in this browser only, before sending.</div>
+    <img id="drawingPreview" class="preview-live" alt="Drawing preview">
+    <label for="outline">Outline attachment (optional, JSON/image)</label>
+    <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt">
+    <img id="outlinePreview" class="preview-live" alt="Outline preview">
+    <p class="note">outline_snap_tool.html output JSON or an outline image. The original is kept in the output folder as input_outline.*.</p>
+    <hr>
+    <h3 style="font-size:14px;">&#129521; Run settings</h3>
+    <label for="output_dir">Output folder</label>
+    <input type="text" id="output_dir" name="output_dir" value="./my_run_output">
+    <p class="note">With the default, a timestamped folder is made automatically (e.g. my_run_output_20261030_090411), so old results are never overwritten. If you name a folder that already holds a result, a timestamped sibling folder is used instead.</p>
+    <label for="freecadcmd">freecadcmd</label>
+    <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
+    <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (assemble the prompt only)</label>
+    <label><input type="checkbox" name="gear" value="on" style="width:auto;"> Gear part (gear reference included only when checked)</label>
+    <label for="api_key">Meta API key</label>
+    <input type="password" id="api_key" name="api_key" autocomplete="off">
+    <p class="note">Key is not stored, used only for this run. Empty means use the repo folder .env key.</p>
+    <p class="note">.env key: {html.escape(status)}</p>
+    <button type="submit" id="runBtn" style="width:100%;margin-top:1em;">&#9654; Run</button>
+    <div id="runState" class="drop-hint" style="display:none;">Running… takes minutes. Do not close the browser.</div>
+    <p class="note">A real run takes minutes. Do not close the browser until it finishes.</p>
+  </div>
+  <div class="main">
+    <h2 style="color:#7eb8f7;font-size:22px;margin:0;">Drawing &rarr; Parametric CAD</h2>
+    <p class="note">The Meta API writes a FreeCAD macro, and freecadcmd builds <code>.fcstd</code> + <code>STEP</code> + a report.
+    Pick a drawing on the left, check the tabs below, then press <code>▶ Run</code>.</p>
+    <p><span class="feat-pill">Body&rarr;Sketch&rarr;Pad/Pocket</span><span class="feat-pill">.fcstd as main file</span><span class="feat-pill">STEP export</span></p>
+    <div class="tabs">
+      <button type="button" class="tab-btn active" data-tab="t1">&#128008; Drawing recognition</button>
+      <button type="button" class="tab-btn" data-tab="t2">&#128207; Parameters &amp; 3D</button>
+      <button type="button" class="tab-btn" data-tab="t3">&#128295; FreeCAD export</button>
+      <button type="button" class="tab-btn" data-tab="t4">&#128269; QA log</button>
+    </div>
+    <div class="tab-panel active" id="t1">
+      <div class="grid2">
+        <div class="card"><h3>Original / input (check samples even before picking)</h3>
+        <p class="note">Picking a file on the left also shows a browser preview here at the same time. Click to open full size in a new tab.</p>
+        <img id="drawingPreviewMain" class="shot" style="display:none;" alt="Drawing preview"></div>
+        <div class="card"><h3>Part notes</h3>
+        <label for="notes">Part notes (optional)</label>
+        <textarea id="notes" name="notes" placeholder="e.g. base D2.8, yoke width 4.8 ..."></textarea>
+        <p class="note">Dimensions are never invented. When something is unclear, the run stops and leaves the questions in guidance.txt.</p></div>
+      </div>
+      {form_gallery_html("en")}
+    </div>
+    <div class="tab-panel" id="t2">
+      <div class="grid2">
+        <div class="card"><h3>&#128207; Dimension parameters</h3>
+        <p class="note">Check dimensions in the parameter block at the top of the macro. <span class="var-badge">INFERRED</span> values are LLM estimates, so in FreeCAD change a dimension and recompute to confirm a single valid solid.</p></div>
+      <div class="card"><h3>&#129521; 3D preview</h3>
+      <p class="note">After a run, check the same shape two ways:
+      interactive 3D viewer (from tris.json, no CDN) + shaded images
+      (preview_iso/main.png, Pillow fallback so they are always made).</p></div>
+      </div>
+    </div>
+    <div class="tab-panel" id="t3">
+      <div class="card"><h3>&#128295; FreeCAD export settings</h3>
+      <p class="note">The sidebar output folder &middot; freecadcmd &middot; dry-run &middot; gear check are used as-is. On submit, the key and freecadcmd are checked first; the API is called only after they pass. The result's main file is <code>model.fcstd</code>, <code>model.step</code> is the export.</p>
+      <button type="submit">&#9654; Run with these settings</button></div>
+    </div>
+    <div class="tab-panel" id="t4">
+      <div class="card"><h3>&#128269; QA log</h3>
+      <p class="note">Pass criteria: <code>solids == 1</code> and <code>valid == True</code> (independent STEP check). Volume and bbox are reference only. A macro log PASS alone is not a pass. Code/API errors are self-fixed at most 3 times; on the 3rd failure the run stops, leaving feature name, geometry number, exact error, cause, and questions.</p></div>
+    </div>
+  </div>
+</div>
+</form>
+<script>
+(function(){{
+  function showFile(inputId, imgIds){{
+    var input = document.getElementById(inputId);
+    if (!input) return;
+    input.addEventListener('change', function(){{
+      var f = input.files && input.files[0];
+      imgIds.forEach(function(id){{
+        var img = document.getElementById(id);
+        if (!img) return;
+        if (!f || (f.type || '').indexOf('image/') !== 0) {{
+          img.style.display = 'none';
+          img.removeAttribute('src');
+          return;
+        }}
+        if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+        var url = URL.createObjectURL(f);
+        img.dataset.url = url;
+        img.src = url;
+        img.style.display = 'block';
+      }});
+    }});
+  }}
+  showFile('drawing', ['drawingPreview', 'drawingPreviewMain']);
+  showFile('outline', ['outlinePreview']);
+  document.querySelectorAll('.tab-btn').forEach(function(b){{
+    b.addEventListener('click', function(){{
+      document.querySelectorAll('.tab-btn').forEach(function(x){{x.classList.remove('active');}});
+      document.querySelectorAll('.tab-panel').forEach(function(x){{x.classList.remove('active');}});
+      b.classList.add('active');
+      document.getElementById(b.dataset.tab).classList.add('active');
+    }});
+  }});
+  document.querySelectorAll('img.shot').forEach(function(img){{
+    img.addEventListener('click', function(){{
+      if (img.src) window.open(img.src, '_blank');
+    }});
+  }});
+  var form = document.getElementById('runForm');
+  if (form) form.addEventListener('submit', function(){{
+    var st = document.getElementById('runState');
+    var btn = document.getElementById('runBtn');
+    if (st) st.style.display = 'block';
+    if (btn) {{ btn.disabled = true; btn.textContent = 'Running…'; }}
+  }});
+  /* recent runs + bundled samples are rendered server-side (no fetch). */
+}})();
+</script>
+"""
+    return page("Drawing-to-Parametric-CAD", body, lang="en")
+
+
+def form_page(lang="en"):
+    """English by default; Korean only with ?lang=ko."""
+    return form_page_ko() if lang == "ko" else form_page_en()
+
+
+def error_page(message, lang="en"):
     body = (f"<div class=\"layout\"><div class=\"sidebar\">"
             f"<h2>&#11042; Drawing&rarr;CAD</h2>"
             f"<p class=\"sub\">orchestrator v0.1</p><hr>"
-            f"<p><a class=\"btn\" href=\"/\">← 폼으로 돌아가기</a></p></div>"
-            f"<div class=\"main\"><h2 style=\"color:#f87171;\">오류</h2>"
+            f"<p><a class=\"btn\" href=\"/?lang={lang}\">{tr(lang, 'error_back')}</a></p></div>"
+            f"<div class=\"main\"><h2 style=\"color:#f87171;\">{tr(lang, 'error_heading')}</h2>"
             f"<div class=\"card\"><p>{html.escape(message)}</p></div></div></div>")
-    return page("오류", body)
+    return page(tr(lang, "error_heading"), body, lang=lang)
 
 
 def parse_multipart(body, boundary):
@@ -455,7 +804,9 @@ def list_result_dirs(limit=12):
             try:
                 if report.is_file():
                     text = report.read_text(encoding="utf-8", errors="replace")
-                    if "RESULT: PASS" in text:
+                    if "RESULT: QUESTIONS PENDING" in text:
+                        status = "questions"
+                    elif "RESULT: PASS" in text:
                         status = "ok"
                     elif "RESULT: FAIL" in text:
                         status = "fail"
@@ -516,12 +867,12 @@ def tris_payload(output_dir):
         return None, str(exc)[:200]
 
 
-def sample_gallery_html():
+def sample_gallery_html(lang="en"):
     """Clickable bundled sample drawings served via /sample?name=."""
     samples = list_sample_images()
     if not samples:
-        return ("<div class=\"card\"><h3>번들 샘플 도면</h3>"
-                "<p class=\"note\">image/ 폴더에 샘플이 없습니다.</p></div>")
+        return (f"<div class=\"card\"><h3>{tr(lang, 'sample_title')}</h3>"
+                f"<p class=\"note\">{tr(lang, 'sample_empty')}</p></div>")
     cards = []
     for item in samples:
         name = item["name"]
@@ -529,84 +880,87 @@ def sample_gallery_html():
         cards.append(
             f"<div class=\"card\"><h3>{html.escape(name)}</h3>"
             f"<img class=\"shot\" src=\"/sample?{query}\" alt=\"{html.escape(name)}\">"
-            f"<p class=\"note\"><a href=\"/sample?{query}\" target=\"_blank\">원본 크기</a> · "
-            "실행 시 도면으로 쓰려면 이 파일을 왼쪽에서 직접 고르세요.</p></div>")
-    return ("<div class=\"card\"><h3>번들 샘플 도면 (클릭하면 원본 크기)</h3>"
-            "<p class=\"note\">image/ 폴더에 들어있는 도면입니다. 서버 파일이라 업로드 없이 바로 눈으로 확인됩니다.</p></div>"
+            f"<p class=\"note\"><a href=\"/sample?{query}\" target=\"_blank\">{tr(lang, 'sample_original')}</a> · "
+            f"{tr(lang, 'sample_use_note')}</p></div>")
+    return (f"<div class=\"card\"><h3>{tr(lang, 'sample_title')}</h3>"
+            f"<p class=\"note\">{tr(lang, 'sample_note')}</p></div>"
             "<div class=\"grid2\">" + "".join(cards) + "</div>")
 
 
-def recent_html():
+def recent_html(lang="en"):
     """Recent runs table (server-side, no JS fetch needed) + JS fallback box."""
     rows = ""
     for item in list_result_dirs():
         badge = ({"ok": "<span class=\"status-ok\">PASS</span>",
-                  "fail": "<span class=\"status-err\">FAIL</span>"}.get(
+                  "fail": "<span class=\"status-err\">FAIL</span>",
+                  "questions": "<span class=\"status-warn\">QUESTIONS</span>"}.get(
                       item["status"], "<span class=\"status-warn\">?</span>"))
-        query = urllib.parse.urlencode({"dir": item["dir"]})
+        query = urllib.parse.urlencode({"dir": item["dir"], "lang": lang})
         rows += (f"<tr><td>{html.escape(item['name'])}</td><td>{badge}</td>"
-                 f"<td><a href=\"/result?{query}\">열기</a></td></tr>")
+                 f"<td><a href=\"/result?{query}\">{tr(lang, 'open_link')}</a></td></tr>")
     if rows:
-        table = (f"<table class=\"files\"><tr><th>출력 폴더</th><th>상태</th>"
-                 f"<th>바로 보기</th></tr>{rows}</table>")
+        table = (f"<table class=\"files\"><tr><th>{tr(lang, 'th_folder')}</th>"
+                 f"<th>{tr(lang, 'th_status')}</th>"
+                 f"<th>{tr(lang, 'th_open')}</th></tr>{rows}</table>")
     else:
-        table = "<p class=\"note\">최근 실행 기록이 없습니다. 위에서 도면을 골라 실행하세요.</p>"
+        table = f"<p class=\"note\">{tr(lang, 'recent_empty')}</p>"
     outline_link = ""
     try:
         if OUTLINE_TOOL_PATH.is_file():
-            outline_link = ("<p class=\"note\">윤곽을 직접 그리고 싶으면 "
-                            "<a href=\"/outline-tool\" target=\"_blank\">윤곽 스냅 도구 열기</a>"
-                            " → JSON 다운 → 왼쪽 윤곽 첨부에 올리세요.</p>")
+            outline_link = (f"<p class=\"note\">{tr(lang, 'outline_note1')}"
+                            "<a href=\"/outline-tool\" target=\"_blank\">"
+                            "outline snap tool</a>"
+                            f"{tr(lang, 'outline_note2')}</p>")
     except OSError:
         pass
-    return (f"<div class=\"card\"><h3>&#128193; 최근 실행 결과 바로 보기</h3>"
-            f"<p class=\"note\">재실행 없이 눈으로 확인. 새 결과도 아래 목록에 바로 뜹니다.</p>"
+    return (f"<div class=\"card\"><h3>&#128193; {tr(lang, 'recent_title')}</h3>"
+            f"<p class=\"note\">{tr(lang, 'recent_note')}</p>"
             f"{table}{outline_link}"
             "<div id=\"recentBox\" class=\"note\" style=\"display:none;\"></div></div>")
 
 
-def form_gallery_html():
+def form_gallery_html(lang="en"):
     """t1 bottom: recent runs + bundled samples (server-side, no JS needed)."""
-    return recent_html() + sample_gallery_html()
+    return recent_html(lang) + sample_gallery_html(lang)
 
 
-def viewer_html(output_dir):
+def viewer_html(output_dir, lang="en"):
     """Interactive canvas viewer block (viewer3d.js + /tris data)."""
     query = urllib.parse.urlencode({"dir": str(output_dir)})
     tris, err = tris_payload(output_dir)
     if tris is None:
-        why = {"missing": "<code>tris.json</code> 없음 (freecadcmd 결과가 아닙니다).",
-               "too-large": "<code>tris.json</code> 8MB 초과 — 브라우저 보호를 위해 뷰어 생략.",
-               "scope": "범위 밖 경로.", "bad-shape": "<code>tris.json</code> 형식 오류."}.get(err, html.escape(err))
-        return ("<div class=\"card\"><h3>&#129521; 돌려보는 3D 뷰어</h3>"
-                f"<p class=\"note\">뷰어 없음 ({why} 아래 PNG 프리뷰를 보세요).</p></div>")
+        why = {"missing": tr(lang, "viewer_missing"),
+               "too-large": tr(lang, "viewer_toolarge"),
+               "scope": tr(lang, "viewer_scope"),
+               "bad-shape": tr(lang, "viewer_badshape")}.get(err, html.escape(err))
+        return (f"<div class=\"card\"><h3>&#129521; {tr(lang, 'viewer_title')}</h3>"
+                f"<p class=\"note\">{tr(lang, 'viewer_none', why=why)}</p></div>")
     js_query = urllib.parse.urlencode({"v": str(VIEWER_JS_PATH.stat().st_mtime)}) \
         if VIEWER_JS_PATH.is_file() else "v=1"
     return f"""
-      <div class="card"><h3>&#129521; 돌려보는 3D 뷰어 (tris.json)</h3>
-      <p class="note">드래그 회전 · 휠 줌 · 버튼 시점 전환. CDN 없이 이 페이지 안에서만 돕니다.
-      facet {html.escape(str(len(tris['facets'])))}개 · 아래 PNG는 같은 형상의 정지 이미지입니다.</p>
+      <div class="card"><h3>&#129521; {tr(lang, 'viewer_title')}</h3>
+      <p class="note">{tr(lang, 'viewer_note', n=len(tris['facets']))}</p>
       <div class="viewer-wrap"><canvas id="viewer3d" width="900" height="420"></canvas>
-      <div class="viewer-bar" id="viewerBar">로딩 중…</div></div>
+      <div class="viewer-bar" id="viewerBar">{tr(lang, 'viewer_loading')}</div></div>
       <div class="viewer-tools">
-        <button type="button" data-view="iso">ISO</button>
-        <button type="button" data-view="main">정면(큰 면)</button>
-        <button type="button" data-view="top">위</button>
-        <button type="button" data-view="side">옆</button>
+        <button type="button" data-view="iso">{tr(lang, 'view_iso')}</button>
+        <button type="button" data-view="main">{tr(lang, 'view_main')}</button>
+        <button type="button" data-view="top">{tr(lang, 'view_top')}</button>
+        <button type="button" data-view="side">{tr(lang, 'view_side')}</button>
       </div>
       <div class="kv" id="viewerMeta"></div></div>
       <script>window.TRIS_URL='/tris?{query}';</script>
       <script src="/viewer3d.js?{js_query}"></script>"""
 
 
-def result_page(output_dir, returncode, stdout_tail=""):
+def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
     # tabbed cards for input images, 3D previews, files/downloads, QA logs.
     if returncode == 0:
-        banner = "<span class=\"status-ok\">✅ 성공 (종료 코드 0)</span>"
+        banner = f"<span class=\"status-ok\">{tr(lang, 'success')}</span>"
     else:
-        banner = (f"<span class=\"status-err\">❌ 실패 "
-                  f"(종료 코드 {html.escape(str(returncode))})</span>")
+        banner = (f"<span class=\"status-err\">"
+                  f"{tr(lang, 'failure', code=html.escape(str(returncode)))}</span>")
     report_text = ""
     report = output_dir / "report.txt"
     if report.is_file():
@@ -620,11 +974,15 @@ def result_page(output_dir, returncode, stdout_tail=""):
     if questions_file.is_file():
         questions_text = questions_file.read_text(encoding="utf-8",
                                                   errors="replace")
-    # A provisional PASS is still exit 0, but the banner must say so:
-    # provisional values were used while questions were unanswered.
-    if returncode == 0 and "provisional" in report_text:
-        banner = ("<span class=\"status-warn\">⚠️ 성공 (임시 — 질문 대기 중, "
-                  "questions.txt 확인)</span>")
+    # Questions exist: this is NOT a success, even though exit 0
+    # and a valid solid exist. The banner says QUESTIONS, keyed off
+    # questions.txt itself (not the report RESULT line), so reopening
+    # an older result folder shows the same banner.
+    if questions_text.strip():
+        banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
+    elif returncode == 0 and "provisional" in report_text:
+        # Old results (pre-QUESTIONS-PENDING) with a provisional PASS.
+        banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
 
     # Answer form (only when questions exist): POST /answer reuses the
     # previous run's drawing/outline and starts a NEW run with the
@@ -642,23 +1000,21 @@ def result_page(output_dir, returncode, stdout_tail=""):
                         in report_text else "")
         dir_query = html.escape(str(output_dir), quote=True)
         answer_form = f"""
-      <div class="card"><h3>✏️ 질문에 답변하고 다시 실행</h3>
-      <p class="note">아래에 답을 적으면, 도면/윤곽은 이 결과에서 자동으로 가져오고
-      답변을 넣은 새 실행이 시작됩니다. 이전 매크로를 이어서 고치는 게 아니라,
-      처음부터 새로 만드는 실행입니다. 출력은 시간 붙은 새 폴더에 생깁니다.
-      이전 부품 설명은 자동으로 안 넘어가니, 필요하면 답변에 같이 적으세요.</p>
+      <div class="card"><h3>{tr(lang, 'answer_title')}</h3>
+      <p class="note">{tr(lang, 'answer_note')}</p>
       <form action="/answer" method="post" enctype="multipart/form-data">
       <input type="hidden" name="dir" value="{dir_query}">
-      <label for="answers">답변 (질문별로 적으세요)</label>
+      <input type="hidden" name="lang" value="{lang}">
+      <label for="answers">{tr(lang, 'answer_label')}</label>
       <textarea id="answers" name="answers" rows="10">{html.escape(prefill)}</textarea>
       <label for="freecadcmd_answer">freecadcmd</label>
       <input type="text" id="freecadcmd_answer" name="freecadcmd" value="freecadcmd">
-      <label><input type="checkbox" name="gear" value="on" {gear_checked} style="width:auto;"> 기어 부품</label>
-      <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
-      <label for="api_key_answer">Meta API 키</label>
+      <label><input type="checkbox" name="gear" value="on" {gear_checked} style="width:auto;"> {tr(lang, 'gear_label')}</label>
+      <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> {tr(lang, 'dry_label')}</label>
+      <label for="api_key_answer">Meta API key</label>
       <input type="password" id="api_key_answer" name="api_key" autocomplete="off">
-      <p class="note">키는 저장되지 않고 이번 실행에만 사용. 비우면 레포 폴더 .env 키 사용.</p>
-      <button type="submit">답변하고 다시 실행</button>
+      <p class="note">{tr(lang, 'key_note')}</p>
+      <button type="submit">{tr(lang, 'continue_button')}</button>
       </form></div>"""
 
     def view_link(name):
@@ -682,32 +1038,32 @@ def result_page(output_dir, returncode, stdout_tail=""):
                       f"{html.escape(line.strip())}</span>")
             break
     if returncode == 0:
-        pills += "<span class=\"feat-pill\">.fcstd 본체</span>"
+        pills += f"<span class=\"feat-pill\">{tr(lang, 'pill_fcstd')}</span>"
     if previews:
-        pills += (f"<span class=\"feat-pill\">프리뷰 "
-                  f"{html.escape(str(len(previews)))}장</span>")
+        pills += (f"<span class=\"feat-pill\">"
+                  f"{tr(lang, 'pill_previews', n=len(previews))}</span>")
 
     def img_card(name, caption):
         return (f"<div class=\"card\"><h3>{html.escape(name)}</h3>"
-                f"<p class=\"note\">{caption} 클릭하면 원본 크기로 새 탭에 열립니다.</p>"
+                f"<p class=\"note\">{caption}{tr(lang, 'click_full')}</p>"
                 f"<img class=\"shot\" src=\"{view_link(name)}\" "
                 f"alt=\"{html.escape(name)}\"></div>")
 
     if input_images:
         t1_cards = "".join(
-            img_card(n, "입력 도면 / 윤곽 (브라우저 보기)")
+            img_card(n, tr(lang, "input_caption"))
             for n in input_images)
     else:
-        t1_cards = ("<div class=\"card\"><p class=\"note\">"
-                    "입력 이미지가 없습니다.</p></div>")
+        t1_cards = (f"<div class=\"card\"><p class=\"note\">"
+                    f"{tr(lang, 'input_none')}</p></div>")
     if previews:
         t2_cards = "".join(
-            img_card(n, "STEP 테셀레이션 음영 프리뷰 — 형상 확인용")
+            img_card(n, tr(lang, "preview_caption"))
             for n in previews)
     else:
-        t2_cards = ("<div class=\"card\"><p class=\"note\">결과 프리뷰가 없습니다 "
-                    "(렌더 실패 — .fcstd / STEP 파일 자체는 위 목록을 확인).</p></div>")
-    t2_viewer = viewer_html(output_dir)
+        t2_cards = (f"<div class=\"card\"><p class=\"note\">"
+                    f"{tr(lang, 'preview_none')}</p></div>")
+    t2_viewer = viewer_html(output_dir, lang)
 
     file_rows = ""
     if output_dir.is_dir():
@@ -719,32 +1075,35 @@ def result_page(output_dir, returncode, stdout_tail=""):
                 file_rows += (
                     f"<tr><td>{html.escape(path.name)}</td>"
                     f"<td>{path.stat().st_size}</td>"
-                    f"<td><a href=\"/download?{query}\">다운로드</a> · "
-                    f"<a href=\"/view?{query}\">보기</a></td></tr>"
+                    f"<td><a href=\"/download?{query}\">{tr(lang, 'download')}</a> · "
+                    f"<a href=\"/view?{query}\">{tr(lang, 'view_link')}</a></td></tr>"
                 )
+    lang_query = urllib.parse.urlencode({"dir": str(output_dir), "lang": "en"})
+    lang_query_ko = urllib.parse.urlencode({"dir": str(output_dir), "lang": "ko"})
     body = f"""
 <div class="layout">
   <div class="sidebar">
     <h2>&#11042; Drawing&rarr;CAD</h2>
-    <p class="sub">orchestrator v0.1 &middot; 실행 결과</p>
+    <p class="sub">orchestrator v0.1 &middot; {tr(lang, 'result_sidebar')}</p>
     <hr>
-    <div class="card"><h3 style="font-size:14px;">실행 결과</h3><p>{banner}</p>
-    <p class="note">출력 폴더<br><code>{html.escape(str(output_dir))}</code></p>
-    <p><a class="btn" href="/">← 폼으로 돌아가기</a></p></div>
+    <div class="card"><h3 style="font-size:14px;">{tr(lang, 'result_sidebar')}</h3><p>{banner}</p>
+    <p class="note">{tr(lang, 'output_folder')}<br><code>{html.escape(str(output_dir))}</code></p>
+    <p><a class="btn" href="/?lang={lang}">{tr(lang, 'back_form')}</a></p>
+    <p class="note"><a href="/result?{lang_query}">English</a> · <a href="/result?{lang_query_ko}">한국어</a></p></div>
   </div>
   <div class="main">
-    <h2 style="color:#7eb8f7;font-size:22px;margin:0;">실행 결과</h2>
+    <h2 style="color:#7eb8f7;font-size:22px;margin:0;">{tr(lang, 'result_heading')}</h2>
     <p>{banner}</p>
     <p>{pills}</p>
     <div class="tabs">
-      <button type="button" class="tab-btn active" data-tab="r1">&#128008; 도면 인식</button>
-      <button type="button" class="tab-btn" data-tab="r2">&#129521; 파라미터 &amp; 3D</button>
-      <button type="button" class="tab-btn" data-tab="r3">&#128295; FreeCAD 내보내기</button>
-      <button type="button" class="tab-btn" data-tab="r4">&#128269; QA 로그</button>
+      <button type="button" class="tab-btn active" data-tab="r1">&#128008; {tr(lang, 'tab_drawing')}</button>
+      <button type="button" class="tab-btn" data-tab="r2">&#129521; {tr(lang, 'tab_params')}</button>
+      <button type="button" class="tab-btn" data-tab="r3">&#128295; {tr(lang, 'tab_export')}</button>
+      <button type="button" class="tab-btn" data-tab="r4">&#128269; {tr(lang, 'tab_qa')}</button>
     </div>
     <div class="tab-panel active" id="r1">
-      <div class="card"><h3>🖼 원본 / 입력 이미지</h3>
-      <p class="note">출력 폴더의 <code>input_drawing.*</code> / <code>input_outline.*</code> 을 브라우저에서 바로 봅니다.</p></div>
+      <div class="card"><h3>🖼 {tr(lang, 'input_title')}</h3>
+      <p class="note">{tr(lang, 'input_note')}</p></div>
       <div class="grid2">{t1_cards}</div>
     </div>
     <div class="tab-panel" id="r2">
@@ -752,17 +1111,17 @@ def result_page(output_dir, returncode, stdout_tail=""):
       <div class="grid2">{t2_cards}</div>
     </div>
     <div class="tab-panel" id="r3">
-      <div class="card"><h3>🔧 출력 파일</h3>
-      <table class="files"><tr><th>파일</th><th>bytes</th><th>링크</th></tr>{file_rows}</table></div>
+      <div class="card"><h3>🔧 {tr(lang, 'files_title')}</h3>
+      <table class="files"><tr><th>{tr(lang, 'th_file')}</th><th>{tr(lang, 'th_bytes')}</th><th>{tr(lang, 'th_link')}</th></tr>{file_rows}</table></div>
     </div>
     <div class="tab-panel" id="r4">
-      <div class="card"><h3>❓ questions.txt (미답변 질문)</h3><pre>{html.escape(questions_text) if questions_text else "(없음 — 이번 매크로에 질문이 없습니다)"}</pre><p class="note">매크로 주석/출력에서 뽑은 질문입니다. 임시값으로 만든 결과라면, 답을 주고 다시 실행하세요.</p></div>
+      <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_text) if questions_text else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
       {answer_form}
       <div class="grid2">
-        <div class="card"><h3>report.txt</h3><pre>{html.escape(report_text) if report_text else "(없음)"}</pre></div>
-        <div class="card"><h3>guidance.txt</h3><pre>{html.escape(guidance_text) if guidance_text else "(없음 — 성공 시 생기지 않습니다)"}</pre></div>
+        <div class="card"><h3>{tr(lang, 'report_title')}</h3><pre>{html.escape(report_text) if report_text else tr(lang, 'report_none')}</pre></div>
+        <div class="card"><h3>{tr(lang, 'guidance_title')}</h3><pre>{html.escape(guidance_text) if guidance_text else tr(lang, 'guidance_none')}</pre></div>
       </div>
-      <div class="card"><h3>실행 로그 (끝부분)</h3><pre>{html.escape(stdout_tail) if stdout_tail else "(없음)"}</pre></div>
+      <div class="card"><h3>{tr(lang, 'log_title')}</h3><pre>{html.escape(stdout_tail) if stdout_tail else tr(lang, 'log_none')}</pre></div>
     </div>
   </div>
 </div>
@@ -784,7 +1143,7 @@ def result_page(output_dir, returncode, stdout_tail=""):
 }})();
 </script>
 """
-    return page("실행 결과", body)
+    return page(tr(lang, "result_heading"), body, lang=lang)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -803,7 +1162,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            data = form_page()
+            lang = pick_lang(urllib.parse.parse_qs(parsed.query).get("lang", [""])[0])
+            data = form_page(lang)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -820,12 +1180,15 @@ class Handler(BaseHTTPRequestHandler):
                   and ((output_dir / "report.txt").is_file()
                        or (output_dir / "guidance.txt").is_file()
                        or (output_dir / "model.step").is_file()))
+            lang = pick_lang(query.get("lang", [""])[0])
             if not ok:
-                self._send_html(400, error_page("결과 폴더를 열 수 없습니다."))
+                self._send_html(400, error_page(tr(lang, "err_result_dir"), lang=lang))
                 return
-            data = result_page(output_dir, 0 if (output_dir / "report.txt").is_file()
-                               and "RESULT: PASS" in (output_dir / "report.txt").read_text(
-                                   encoding="utf-8", errors="replace") else 1)
+            # Banner keys off questions.txt, so reopened results show
+            # QUESTIONS even when the stored report says PASS.
+            data = result_page(output_dir,
+                               0 if (output_dir / "report.txt").is_file() else 1,
+                               lang=lang)
             self._send_html(200, data)
             return
         if parsed.path == "/tris":
@@ -890,7 +1253,8 @@ class Handler(BaseHTTPRequestHandler):
             target = safe_download_path(output_dir, raw_file) if output_dir else None
             mime, _enc = mimetypes.guess_type(str(target)) if target else (None, None)
             if target is None or not (mime or "").startswith("image/"):
-                data = error_page("브라우저에서 볼 수 없는 파일입니다.")
+                lang = pick_lang(query.get("lang", [""])[0])
+                data = error_page(tr(lang, "err_view_file"), lang=lang)
                 self.send_response(400)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
@@ -911,7 +1275,8 @@ class Handler(BaseHTTPRequestHandler):
             output_dir = Path(raw_dir).resolve() if raw_dir else None
             target = safe_download_path(output_dir, raw_file) if output_dir else None
             if target is None:
-                data = error_page("다운로드할 수 없는 경로입니다.")
+                lang = pick_lang(query.get("lang", [""])[0])
+                data = error_page(tr(lang, "err_download_path"), lang=lang)
                 self.send_response(400)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
@@ -942,18 +1307,20 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         body = self.rfile.read(length) if length > 0 else b""
         content_type = self.headers.get("Content-Type", "")
+        lang = "en"
         if "multipart/form-data" not in content_type or "boundary=" not in content_type:
-            data = error_page("폼 형식이 올바르지 않습니다. 폼에서 다시 제출하세요.")
+            data = error_page(tr(lang, "err_form"), lang=lang)
             self._send_html(400, data)
             return
         boundary = content_type.split("boundary=", 1)[1].strip().strip('"').encode("ascii")
         try:
             fields, files = parse_multipart(body, boundary)
         except Exception:
-            data = error_page("업로드 파싱에 실패했습니다. 다시 제출하세요.")
+            data = error_page(tr(lang, "err_parse"), lang=lang)
             self._send_html(400, data)
             return
 
+        lang = pick_lang(fields.get("lang", ""))
         if parsed.path == "/answer":
             # Translate the answer form into a /run-equivalent
             # submission, then fall through to the shared /run logic
@@ -967,17 +1334,17 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     prev_dir = None
             if prev_dir is None or not prev_dir.is_dir():
-                data = error_page("이전 결과 폴더를 찾을 수 없습니다.")
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
                 self._send_html(400, data)
                 return
             answers = fields.get("answers", "").strip()
             if not answers:
-                data = error_page("답변을 입력하세요.")
+                data = error_page(tr(lang, "err_answers_empty"), lang=lang)
                 self._send_html(400, data)
                 return
             drawings = sorted(prev_dir.glob("input_drawing.*"))
             if not drawings:
-                data = error_page("이전 결과에 도면(input_drawing.*)이 없습니다.")
+                data = error_page(tr(lang, "err_prev_no_drawing"), lang=lang)
                 self._send_html(400, data)
                 return
             drawing_path = drawings[0]
@@ -1000,8 +1367,7 @@ class Handler(BaseHTTPRequestHandler):
         # Key sources: (1) the password field, (2) a local .env file
         # read by run_pipeline.py. Only if neither is present, stop.
         if not dry_run and not api_key and not dotenv_key_present():
-            data = error_page("API 키를 입력하거나, dry-run을 선택하거나, "
-                              "레포 폴더에 .env 파일을 만드세요.")
+            data = error_page(tr(lang, "err_key"), lang=lang)
             self._send_html(400, data)
             return
         # Pre-flight: freecadcmd must be findable before any API call.
@@ -1009,16 +1375,11 @@ class Handler(BaseHTTPRequestHandler):
         # with a Korean explanation, so no API credit is spent.
         freecadcmd_value = fields.get("freecadcmd", "freecadcmd") or "freecadcmd"
         if not dry_run and not freecadcmd_found(freecadcmd_value):
-            data = error_page(
-                "freecadcmd를 찾을 수 없습니다. FreeCAD 1.1.4가 설치돼 있는지 "
-                "확인하고, freecadcmd 칸에 전체 경로를 입력하세요. "
-                "Windows 예: C:\\Program Files\\FreeCAD 1.1.4\\bin\\freecadcmd.exe "
-                "(설치 폴더에 따라 다릅니다). 이 단계에서 API는 호출되지 "
-                "않았습니다.")
+            data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
             self._send_html(400, data)
             return
         if "drawing" not in files or not files["drawing"][1]:
-            data = error_page("도면 이미지를 선택하세요.")
+            data = error_page(tr(lang, "err_drawing"), lang=lang)
             self._send_html(400, data)
             return
 
@@ -1068,7 +1429,7 @@ class Handler(BaseHTTPRequestHandler):
         # Never show the key: web_ui_run.log holds only the pipeline's
         # own output, which never prints the key, and this page shows
         # only report/guidance/file names, never the command or the key.
-        data = result_page(output_dir, result.returncode)
+        data = result_page(output_dir, result.returncode, lang=lang)
         self._send_html(200, data)
 
     def _send_html(self, status, data):

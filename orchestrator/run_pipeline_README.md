@@ -39,8 +39,9 @@ python3 run_pipeline.py --drawing my_drawing.png --text "부품 설명" --output
 - 매크로에 Q1~Q9 같은 질문이 있으면, `<output-dir>/questions.txt`로
   뽑히고 report.txt에도 적혀. 결과 페이지 QA 탭에서 바로 보여.
 - 질문이 있는데도 솔리드가 만들어지면, 종료 코드는 0이지만 결과는
-  “PASS (provisional — questions pending)”야. 그냥 PASS가 아니야.
-  임시값으로 만든 모델이니까, 답을 주고 다시 실행해.
+  성공이 아니야. report.txt에는 “RESULT: QUESTIONS PENDING”으로
+  적히고, 결과 페이지 배너에도 “질문 대기 중 — 성공이 아닙니다”로
+  뜬다. 임시값으로 만든 모델이니까, 답을 주고 다시 실행해.
 - 안전 검사는 주석을 검사하지 않아. 주석에 “AttachmentOffset”이라고
   적혀 있다고 실행을 막지 않아. 코드로 실제로 쓰는 경우만 막아.
 

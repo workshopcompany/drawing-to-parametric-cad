@@ -80,9 +80,10 @@ run itself does not fail, and the report says "Previews: unavailable".
   `<output-dir>/questions.txt` and listed in `report.txt`, and shown
   on the web UI QA tab.
 - If a solid is built while questions are unanswered, the exit code
-  is still 0, but the result is "PASS (provisional — questions
-  pending)", not a clean PASS. It was built with provisional values,
-  so answer and rerun.
+  is still 0, but the result is NOT a success. `report.txt` says
+  "RESULT: QUESTIONS PENDING", and the result page banner says
+  "Questions pending — NOT a success". It was built with provisional
+  values, so answer and rerun.
 - The safety check does not check comments. A comment mentioning
   "AttachmentOffset" does not block a macro; only actual code use
   does.

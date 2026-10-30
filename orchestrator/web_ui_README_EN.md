@@ -54,21 +54,37 @@ output file list with download links.
 If the macro asked Q1–Q9 questions, they are extracted to
 `questions.txt` and shown on the QA tab. A result built with
 provisional values while questions were unanswered is shown as
-"success (provisional — questions pending)", not a clean success.
-Answer the questions and rerun.
+"Questions pending — NOT a success", not a success at all.
+Answer the questions and continue work.
 
-## Answer questions and rerun (answer form on the QA tab)
+## Language: English by default, Korean switchable
+The default UI is English. Click the "한국어" link at the top of
+the sidebar for the Korean UI, and the same link on a result page
+to switch there (`?lang=ko`). Click "English" to switch back. The
+choice travels with the form's hidden field to the result page.
+
+## Answer questions and continue work (answer form on the QA tab)
+A result with questions is NOT a success. The banner says
+"Questions pending — NOT a success", and `report.txt` says
+"RESULT: QUESTIONS PENDING" (the exit code stays 0 only so the
+built solid's files are kept).
 A result with questions shows an answer form below the questions on
-the QA tab. Fill in an answer per question and submit: the drawing
-and outline are taken automatically from that result, and a new run
-starts with the answers as `--text`. This is a fresh run from
-scratch, not a resume of the old macro, and its output goes to a new
-timestamped folder. The gear checkbox defaults to the previous
-result's setting (from `report.txt`) and can be changed. freecadcmd
-and the API key must be entered again (previous values are not
-stored). Previous part notes are not carried over automatically, so
-include anything still needed in the answers. An empty answer does
-not run.
+the QA tab. Fill in an answer per question and press Continue work:
+the drawing and outline are taken automatically from that result,
+and a new run starts with the answers reflected as `--text`. This
+is a fresh run from scratch, not a resume of the old macro, and its
+output goes to a new timestamped folder. The gear checkbox defaults
+to the previous result's setting (from `report.txt`) and can be
+changed. freecadcmd and the API key must be entered again (previous
+values are not stored). Previous part notes are not carried over
+automatically, so include anything still needed in the answers. An
+empty answer does not run.
+Note: the web UI server loads its code into memory at startup, so
+after replacing files, stop and restart the server for the new UI
+(questions banner, answer form, language switch) to appear.
+run_pipeline is read fresh on every run, so with an old server
+still running, questions can land in the report while the page
+still shows the old UI.
 
 ## Output folders (timestamped, never overwritten)
 Running with the default (`./my_run_output`) creates a timestamped

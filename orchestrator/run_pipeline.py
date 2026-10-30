@@ -744,13 +744,15 @@ def main(argv=None):
         if not preview_ok:
             report_lines.append(f"Previews: unavailable ({preview_note})")
         if questions:
-            # Still exit 0 (a valid solid was built), but NEVER a
-            # clean PASS: provisional values were used while these
-            # questions were unanswered. "RESULT: PASS" is kept as a
-            # substring so the web UI badge logic still matches.
+            # Still exit 0 (a valid solid was built and its files
+            # are kept), but this is NOT a success: provisional
+            # values were used while these questions were
+            # unanswered. The RESULT line therefore says QUESTIONS
+            # PENDING, never PASS, and the web UI banner says the
+            # same (it keys off questions.txt, not this line).
             report_lines.append(
-                "RESULT: PASS (provisional - questions pending, "
-                "see questions.txt)")
+                "RESULT: QUESTIONS PENDING (not a success - "
+                "answer questions.txt and rerun)")
         else:
             report_lines.append("RESULT: PASS")
         write_report(output_dir / "report.txt", report_lines)
