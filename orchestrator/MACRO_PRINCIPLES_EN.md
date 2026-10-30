@@ -47,6 +47,9 @@ Terminology: use "empty hole" for a hole, never "void".
       The bottom cut normal is global −Y.
   - FreeCAD DistanceX/Y note: a DistanceX/Y constraint given as (point, origin) is solved as
     point = −value. Do not assume point = value. In macro_v8 this sent rectangles to the opposite side.
+  - DistanceX/Y between two points solves as second − first, do NOT negate.
+    Example: from x=−1.8 to x=+1.8 needs DistanceX = +3.6, not −3.6.
+    Negating it sent the profile to x=−5.4 and self-intersected the sketch.
 - Origin rule: build from origin 0,0,0. Origin is the input shaft tip, +X is the output direction.
   All positions are measured from the origin with +/− signs.
   If a direction is not in the drawing, decide it while designing, flag it as provisional, and proceed.
@@ -60,6 +63,10 @@ Terminology: use "empty hole" for a hole, never "void".
 - Use the minimum constraint set that turns the sketch green in FreeCAD.
 - Green = fully constrained with a minimum, non-redundant set.
 - Neither under-constrained (white) nor over-constrained with duplicate/conflicting constraints.
+- Every constraint value must agree with the coordinates you constructed.
+  A constraint that fights the geometry moves or flips the profile.
+  Example: do not force 24.0° on a diagonal built at 24.04° — use the exact
+  computed value or omit that constraint.
 - Example: do not use Symmetric and origin Coincident together.
 - Do not constrain a single point alone. A solitary point Lock is a wrong constraint.
   Position a point by reference instead: DistanceX/Y from the origin with +/− signs,
