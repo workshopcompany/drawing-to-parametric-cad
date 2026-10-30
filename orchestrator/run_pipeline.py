@@ -657,26 +657,39 @@ def main(argv=None):
         # from the STEP tessellation, shown in the web UI result page.
         # A missing matplotlib or a render failure must NOT fail the
         # run — the .fcstd / STEP files are the result.
+        # Chain: render_preview.py (matplotlib) first, then
+        # render_preview_pil.py (Pillow+numpy, always present here).
         preview_iso = output_dir / "preview_iso.png"
         preview_main = output_dir / "preview_main.png"
         tris_path = output_dir / "tris.json"
-        render_script = Path(__file__).resolve().parent / "render_preview.py"
-        try:
-            preview_result = subprocess.run(
-                [sys.executable, str(render_script), str(tris_path),
-                 str(preview_iso), str(preview_main)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=300, text=True)
-            if preview_iso.is_file() and preview_main.is_file():
-                report_lines.append(
-                    f"Previews: {preview_iso}, {preview_main}")
-            else:
-                report_lines.append(
-                    "Previews: unavailable "
-                    f"(render exit {preview_result.returncode}, "
-                    f"output: {preview_result.stdout[-300:]})")
-        except Exception as exc:
-            report_lines.append(f"Previews: unavailable ({exc})")
+        render_scripts = [
+            Path(__file__).resolve().parent / "render_preview.py",
+            Path(__file__).resolve().parent / "render_preview_pil.py",
+        ]
+        preview_ok = False
+        preview_note = ""
+        for render_script in render_scripts:
+            if not render_script.is_file():
+                continue
+            try:
+                preview_result = subprocess.run(
+                    [sys.executable, str(render_script), str(tris_path),
+                     str(preview_iso), str(preview_main)],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    timeout=300, text=True)
+                if preview_iso.is_file() and preview_main.is_file():
+                    report_lines.append(
+                        f"Previews: {preview_iso}, {preview_main} "
+                        f"(via {render_script.name})")
+                    preview_ok = True
+                    break
+                preview_note = (
+                    f"{render_script.name} exit {preview_result.returncode}, "
+                    f"output: {preview_result.stdout[-300:]}")
+            except Exception as exc:
+                preview_note = f"{render_script.name}: {exc}"
+        if not preview_ok:
+            report_lines.append(f"Previews: unavailable ({preview_note})")
         report_lines.append("RESULT: PASS")
         write_report(output_dir / "report.txt", report_lines)
         print("\n".join(report_lines))

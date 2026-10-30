@@ -7,3 +7,9 @@ __pycache__/
 
 # Local notes (not part of the submission)
 *.local.md
+
+# Local API key file — NEVER commit this. .env.example is the template.
+.env
+
+# Local sample drawings (may contain company info) — never commit.
+orchestrator/image/

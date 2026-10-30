@@ -46,6 +46,7 @@ Security (read this before changing anything):
 
 import argparse
 import html
+import json
 import mimetypes
 import os
 import shutil
@@ -57,23 +58,95 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUN_PIPELINE = SCRIPT_DIR / "run_pipeline.py"
+SAMPLE_DIR = SCRIPT_DIR / "image"
+VIEWER_JS_PATH = SCRIPT_DIR / "viewer3d.js"
+OUTLINE_TOOL_PATH = SCRIPT_DIR / "outline_snap_tool.html"
+MAX_TRIS_BYTES = 8 * 1024 * 1024
 
 PAGE_CSS = (
-    "body{font-family:sans-serif;max-width:760px;margin:2em auto;padding:0 1em;}"
-    "label{display:block;margin:1em 0 0.3em;font-weight:bold;}"
-    "input[type=text],input[type=password],textarea{width:100%;box-sizing:border-box;}"
-    "textarea{height:6em;}button{margin-top:1.5em;padding:0.6em 1.5em;}"
-    "pre{white-space:pre-wrap;background:#f4f4f4;padding:1em;overflow:auto;}"
-    ".note{color:#555;}"
+    # No external fonts: localhost-only / offline. 'IBM Plex *' names
+    # below fall back to system sans-serif / monospace when absent.
+    "html,body{margin:0;padding:0;background:#0a0c10;color:#c8d0e0;"
+    "font-family:'IBM Plex Sans',sans-serif;}"
+    "h1,h2,h3{font-family:'IBM Plex Mono',monospace;}"
+    ".layout{display:flex;min-height:100vh;}"
+    ".sidebar{width:284px;flex:0 0 284px;background:#0d0f14;"
+    "border-right:1px solid #1e2330;padding:22px 18px;box-sizing:border-box;}"
+    ".sidebar *{color:#c8d0e0;}"
+    ".sidebar h2{font-size:18px;color:#7eb8f7;margin:0 0 4px;}"
+    ".sidebar .sub{font-size:12px;color:#8fa0bd;margin:0 0 14px;}"
+    ".sidebar hr{border-color:#1e2330;}"
+    ".main{flex:1;padding:26px 30px;max-width:1180px;box-sizing:border-box;}"
+    ".card{background:#111520;border:1px solid #1e2330;border-radius:8px;"
+    "padding:18px 20px;margin-bottom:14px;}"
+    ".grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}"
+    "@media (max-width:900px){.grid2{grid-template-columns:1fr;}"
+    ".layout{flex-direction:column;}.sidebar{width:100%;flex:auto;}}"
+    ".feat-pill{display:inline-block;background:#12203a;border:1px solid #1e3a6e;"
+    "border-radius:20px;padding:3px 12px;font-size:12px;color:#5ba3f5;"
+    "margin-right:6px;margin-bottom:6px;font-family:'IBM Plex Mono',monospace;}"
+    ".var-badge{display:inline-block;background:#1a1f2e;border:1px solid #2a3450;"
+    "border-radius:4px;padding:1px 7px;font-family:'IBM Plex Mono',monospace;"
+    "font-size:12px;color:#7eb8f7;margin-right:4px;margin-bottom:4px;}"
+    ".status-ok{color:#4ade80;font-weight:600;}"
+    ".status-warn{color:#facc15;font-weight:600;}"
+    ".status-err{color:#f87171;font-weight:600;}"
+    "label{display:block;margin:1em 0 0.3em;font-weight:600;font-size:13px;}"
+    "input[type=text],input[type=password],textarea{width:100%;box-sizing:border-box;"
+    "background:#131824;color:#c8d0e0;border:1px solid #2a3450;border-radius:5px;"
+    "padding:8px 10px;font-family:'IBM Plex Mono',monospace;font-size:13px;}"
+    "textarea{height:6em;font-family:'IBM Plex Sans',sans-serif;}"
+    "input[type=file]{width:100%;font-size:13px;color:#c8d0e0;}"
+    "button,.btn{background:#1a2540 !important;color:#7eb8f7 !important;"
+    "border:1px solid #2a3f6e !important;border-radius:6px !important;"
+    "font-family:'IBM Plex Mono',monospace !important;font-size:13px !important;"
+    "padding:0.6em 1.5em;cursor:pointer;text-decoration:none;display:inline-block;}"
+    "button:hover,.btn:hover{background:#243260 !important;border-color:#4a6aae !important;}"
+    "pre{white-space:pre-wrap;background:#0d1117;border:1px solid #1e2330;"
+    "color:#c8d0e0;padding:1em;overflow:auto;border-radius:6px;max-height:420px;"
+    "font-family:'IBM Plex Mono',monospace;font-size:12px;}"
+    ".note{color:#8fa0bd;font-size:12px;}"
+    "code{font-family:'IBM Plex Mono',monospace;background:#1a1f2e;"
+    "padding:1px 5px;border-radius:4px;font-size:12px;}"
+    "hr{border-color:#1e2330 !important;}"
+    "img.shot{max-width:100%;border:1px solid #1e2330;border-radius:8px;background:#0d1117;"
+    "cursor:zoom-in;display:block;}"
+    "img.preview-live{max-width:100%;max-height:320px;border:1px solid #2a3450;"
+    "border-radius:8px;background:#0d1117;display:none;margin-top:8px;}"
+    ".drop-hint{border:1px dashed #2a3450;border-radius:8px;padding:10px;margin-top:8px;"
+    "font-size:12px;color:#8fa0bd;}"
+    "table.files{width:100%;border-collapse:collapse;font-size:13px;}"
+    "table.files td,table.files th{border-bottom:1px solid #1e2330;padding:6px 8px;"
+    "text-align:left;font-family:'IBM Plex Mono',monospace;font-size:12px;}"
+    "table.files a{color:#7eb8f7;}"
+    ".tabs{display:flex;gap:8px;margin:14px 0;flex-wrap:wrap;}"
+    ".tab-btn{background:#131824;border:1px solid #2a3450;color:#c8d0e0;"
+    "border-radius:6px;padding:8px 14px;cursor:pointer;"
+    "font-family:'IBM Plex Mono',monospace;font-size:13px;}"
+    ".tab-btn.active{background:#1a2540;color:#7eb8f7;border-color:#4a6aae;}"
+    ".tab-panel{display:none;}"
+    ".tab-panel.active{display:block;}"
+    "a{color:#7eb8f7;}"
+    ".viewer-wrap{position:relative;background:#0d1117;border:1px solid #1e2330;"
+    "border-radius:8px;overflow:hidden;}"
+    ".viewer-wrap canvas{width:100%;height:420px;display:block;cursor:grab;touch-action:none;}"
+    ".viewer-bar{position:absolute;left:8px;top:6px;color:#8fb0c8;"
+    "font:11px/1.4 monospace;text-shadow:0 0 3px #000;pointer-events:none;"
+    "white-space:nowrap;overflow:hidden;max-width:96%;}"
+    ".viewer-tools{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}"
+    ".viewer-tools button{padding:0.4em 0.9em;}"
+    ".kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px;"
+    "font-family:'IBM Plex Mono',monospace;}"
 )
 
 FOOTER = (
     "<hr><p class=\"note\">실행 방법 — Windows: <code>python web_ui.py</code> / "
     "Mac·Linux: <code>python3 web_ui.py</code> — 그 뒤 브라우저에서 "
     "http://127.0.0.1:8000/ 을 여세요.<br>"
-    "이 UI는 사용자의 PC에서만 돌아가며, Muse가 이 PC를 조종하게 하지 않습니다. "
+    "이 UI는 사용자의 PC(127.0.0.1)에서만 돌아가며, Muse가 이 PC를 조종하게 하지 않습니다. "
     "FreeCAD도 대신하지 않습니다. FreeCAD 1.1.4가 필요하고, freecadcmd가 PATH에 "
-    "없으면 위 freecadcmd 칸에 경로를 입력하세요.</p>"
+    "없으면 실행 설정 칸에 전체 경로를 입력하세요.<br>"
+    "스타일 참조: mp3d-cad-system 대시보드(다크 테마 · 사이드바 · 2단 카드 · 탭 결과).</p>"
 )
 
 
@@ -111,46 +184,153 @@ def freecadcmd_found(value):
 def page(title, body):
     return (
         "<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         f"<title>{html.escape(title)}</title>"
         f"<style>{PAGE_CSS}</style></head><body>"
-        f"<h1>{html.escape(title)}</h1>{body}{FOOTER}</body></html>"
+        f"{body}{FOOTER}</body></html>"
     ).encode("utf-8")
 
 
 def form_page():
-    body = """
-<form action="/run" method="post" enctype="multipart/form-data">
-<label for="drawing">도면 이미지</label>
-<input type="file" id="drawing" name="drawing" accept="image/*" required>
-<label for="outline">윤곽 첨부 (선택)</label>
-<input type="file" id="outline" name="outline" accept="image/*,.json,.txt">
-<p class="note">윤곽 스냅 도구(outline_snap_tool.html)에서 뽑은 JSON, 또는 윤곽 이미지. JSON은 요약해서 LLM 프롬프트에 넣고, 이미지는 두 번째 이미지로 LLM에 보냅니다. 원본은 출력 폴더에 outline_input.* 으로 보관됩니다.</p>
-<label for="notes">부품 설명 (선택)</label>
-<textarea id="notes" name="notes" placeholder="예: 기어, 모듈 0.5, 30T"></textarea>
-<label><input type="checkbox" name="gear" value="on"> 기어 부품 (체크하면 --gear, 기어 참조 포함)</label>
-<label for="output_dir">출력 폴더</label>
-<input type="text" id="output_dir" name="output_dir" value="./my_run_output">
-<p class="note">서버를 시작한 폴더 기준 상대 경로입니다. 결과(.fcstd, .step, 보고서)가 이 폴더에 생깁니다.</p>
-<label for="freecadcmd">freecadcmd</label>
-<input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
-<p class="note">FreeCAD 1.1.4가 PATH에 없으면, 전체 경로를 입력하세요. Windows 예: C:\\Program Files\\FreeCAD 1.1.4\\bin\\freecadcmd.exe (설치 폴더에 따라 다릅니다). 이 경로가 틀리면 API 호출 전에 여기서 멈춥니다.</p>
-<label><input type="checkbox" name="dry_run" value="on"> dry-run (API 호출 없이 프롬프트 조립만 확인)</label>
-<p class="note">처음엔 dry-run으로 프롬프트 조립부터 확인하세요.</p>
-<label for="api_key">Meta API 키</label>
-<input type="password" id="api_key" name="api_key" autocomplete="off">
-<p class="note">키는 저장되지 않고, 이번 실행에만 사용됩니다. 채팅이나 코드에 붙여넣지 마세요. 키 칸을 비우면, 레포 폴더의 .env 파일에 있는 키를 사용합니다.</p>
-<p class="note">.env 키: __DOTENV_STATUS__</p>
-<button type="submit">실행</button>
+    status = ("있음" if dotenv_key_present()
+              else "없음 (키 칸에 입력하거나, 레포 폴더에 .env 파일을 만드세요)")
+    body = f"""
+<form action="/run" method="post" enctype="multipart/form-data" id="runForm">
+<div class="layout">
+  <div class="sidebar">
+    <h2>&#11042; Drawing&rarr;CAD</h2>
+    <p class="sub">orchestrator v0.1 &middot; localhost only</p>
+    <hr>
+    <h3 style="font-size:14px;">&#128193; 파일 열기</h3>
+    <label for="drawing">도면 이미지 (PNG/JPG)</label>
+    <input type="file" id="drawing" name="drawing" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp" required>
+    <div class="drop-hint">PDF는 아직 지원하지 않습니다. PDF 도면은 이미지(PNG/JPG)로 바꿔서 올려주세요.</div>
+    <div class="drop-hint">파일을 고르면 전송 전에 이 브라우저 안에서만 미리보기가 뜹니다.</div>
+    <img id="drawingPreview" class="preview-live" alt="도면 미리보기">
+    <label for="outline">윤곽 첨부 (선택, JSON/이미지)</label>
+    <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt">
+    <img id="outlinePreview" class="preview-live" alt="윤곽 미리보기">
+    <p class="note">outline_snap_tool.html 출력 JSON 또는 윤곽 이미지. 원본은 출력 폴더에 input_outline.* 로 보관.</p>
+    <hr>
+    <h3 style="font-size:14px;">&#129521; 실행 설정</h3>
+    <label for="output_dir">출력 폴더</label>
+    <input type="text" id="output_dir" name="output_dir" value="./my_run_output">
+    <label for="freecadcmd">freecadcmd</label>
+    <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
+    <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
+    <label><input type="checkbox" name="gear" value="on" style="width:auto;"> 기어 부품 (체크 시에만 기어 참조 포함)</label>
+    <label for="api_key">Meta API 키</label>
+    <input type="password" id="api_key" name="api_key" autocomplete="off">
+    <p class="note">키는 저장되지 않고 이번 실행에만 사용. 비우면 레포 폴더 .env 키 사용.</p>
+    <p class="note">.env 키: {html.escape(status)}</p>
+    <button type="submit" id="runBtn" style="width:100%;margin-top:1em;">&#9654; 실행</button>
+    <div id="runState" class="drop-hint" style="display:none;">실행 중… 수 분 걸립니다. 브라우저를 닫지 마세요.</div>
+    <p class="note">실제 실행은 몇 분 걸립니다. 끝날 때까지 브라우저를 닫지 마세요.</p>
+  </div>
+  <div class="main">
+    <h2 style="color:#7eb8f7;font-size:22px;margin:0;">도면 &rarr; 파라메트릭 CAD</h2>
+    <p class="note">Meta API가 FreeCAD 매크로를 만들고, freecadcmd가 <code>.fcstd</code> + <code>STEP</code> + 보고서를 만듭니다.
+    왼쪽에서 도면을 고르고, 아래 탭에서 설명을 확인한 뒤 <code>▶ 실행</code>을 누르세요.</p>
+    <p><span class="feat-pill">Body&rarr;Sketch&rarr;Pad/Pocket</span><span class="feat-pill">.fcstd 본체</span><span class="feat-pill">STEP export</span></p>
+    <div class="tabs">
+      <button type="button" class="tab-btn active" data-tab="t1">&#128008; 도면 인식</button>
+      <button type="button" class="tab-btn" data-tab="t2">&#128207; 파라미터 &amp; 3D</button>
+      <button type="button" class="tab-btn" data-tab="t3">&#128295; FreeCAD 내보내기</button>
+      <button type="button" class="tab-btn" data-tab="t4">&#128269; QA 로그</button>
+    </div>
+    <div class="tab-panel active" id="t1">
+      <div class="grid2">
+        <div class="card"><h3>원본 / 입력 (고르기 전에도 샘플 확인)</h3>
+        <p class="note">왼쪽에서 고르면 브라우저 미리보기가 여기에도 동시에 뜹니다. 클릭하면 원본 크기로 새 탭에 열립니다.</p>
+        <img id="drawingPreviewMain" class="shot" style="display:none;" alt="도면 미리보기"></div>
+        <div class="card"><h3>부품 설명</h3>
+        <label for="notes">부품 설명 (선택)</label>
+        <textarea id="notes" name="notes" placeholder="예: 베이스 D2.8, 요크 폭 4.8 ..."></textarea>
+        <p class="note">치수를 지어내지 않습니다. 모호하면 멈추고 guidance.txt에 질문을 남깁니다.</p></div>
+      </div>
+      {form_gallery_html()}
+    </div>
+    <div class="tab-panel" id="t2">
+      <div class="grid2">
+        <div class="card"><h3>&#128207; 치수 파라미터</h3>
+        <p class="note">매크로 상단 파라미터 블록에서 치수를 확인하세요. <span class="var-badge">INFERRED</span> 값은 LLM 추정치이므로 FreeCAD에서 치수를 바꿔 재계산해 단일 유효 솔리드인지 확인하세요.</p></div>
+      <div class="card"><h3>&#129521; 3D 미리보기</h3>
+      <p class="note">실행 후 같은 형상을 두 방식으로 눈으로 확인합니다:
+      돌려보는 3D 뷰어(tris.json 기준, CDN 없음) + 음영 이미지
+      (preview_iso/main.png, Pillow 폴백이라 설치 없이 항상 생성).</p></div>
+      </div>
+    </div>
+    <div class="tab-panel" id="t3">
+      <div class="card"><h3>&#128295; FreeCAD 내보내기 설정</h3>
+      <p class="note">왼쪽 사이드바의 출력 폴더 &middot; freecadcmd &middot; dry-run &middot; 기어 체크가 그대로 쓰입니다. 제출하면 키 &middot; freecadcmd 유무를 먼저 점검하고 통과해야 API를 호출합니다. 결과는 <code>model.fcstd</code>가 본체, <code>model.step</code>은 export입니다.</p>
+      <button type="submit">&#9654; 이 설정으로 실행</button></div>
+    </div>
+    <div class="tab-panel" id="t4">
+      <div class="card"><h3>&#128269; QA 로그</h3>
+      <p class="note">합격 기준: <code>solids == 1</code> and <code>valid == True</code> (STEP 독립 검증). 부피 &middot; bbox는 참고용. 매크로 로그 PASS만으로는 합격하지 않습니다. 코드/API 오류만 최대 3회 자가수정, 3회 실패 시 피처명 &middot; 기하번호 &middot; 정확한 에러 &middot; 원인 &middot; 질문을 남기고 멈춥니다.</p></div>
+    </div>
+  </div>
+</div>
 </form>
-<p class="note">실제 실행은 몇 분 걸릴 수 있습니다. 실행이 끝날 때까지 브라우저를 닫지 마세요.</p>
+<script>
+(function(){{
+  function showFile(inputId, imgIds){{
+    var input = document.getElementById(inputId);
+    if (!input) return;
+    input.addEventListener('change', function(){{
+      var f = input.files && input.files[0];
+      imgIds.forEach(function(id){{
+        var img = document.getElementById(id);
+        if (!img) return;
+        if (!f || (f.type || '').indexOf('image/') !== 0) {{
+          img.style.display = 'none';
+          img.removeAttribute('src');
+          return;
+        }}
+        if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+        var url = URL.createObjectURL(f);
+        img.dataset.url = url;
+        img.src = url;
+        img.style.display = 'block';
+      }});
+    }});
+  }}
+  showFile('drawing', ['drawingPreview', 'drawingPreviewMain']);
+  showFile('outline', ['outlinePreview']);
+  document.querySelectorAll('.tab-btn').forEach(function(b){{
+    b.addEventListener('click', function(){{
+      document.querySelectorAll('.tab-btn').forEach(function(x){{x.classList.remove('active');}});
+      document.querySelectorAll('.tab-panel').forEach(function(x){{x.classList.remove('active');}});
+      b.classList.add('active');
+      document.getElementById(b.dataset.tab).classList.add('active');
+    }});
+  }});
+  document.querySelectorAll('img.shot').forEach(function(img){{
+    img.addEventListener('click', function(){{
+      if (img.src) window.open(img.src, '_blank');
+    }});
+  }});
+  var form = document.getElementById('runForm');
+  if (form) form.addEventListener('submit', function(){{
+    var st = document.getElementById('runState');
+    var btn = document.getElementById('runBtn');
+    if (st) st.style.display = 'block';
+    if (btn) {{ btn.disabled = true; btn.textContent = '실행 중…'; }}
+  }});
+  /* recent runs + bundled samples are rendered server-side (no fetch). */
+}})();
+</script>
 """
-    status = "있음" if dotenv_key_present() else "없음 (키 칸에 입력하거나, 레포 폴더에 .env 파일을 만드세요)"
-    body = body.replace("__DOTENV_STATUS__", status)
     return page("Drawing-to-Parametric-CAD", body)
 
 
 def error_page(message):
-    body = f"<p>{html.escape(message)}</p><p><a href=\"/\">← 폼으로 돌아가기</a></p>"
+    body = (f"<div class=\"layout\"><div class=\"sidebar\">"
+            f"<h2>&#11042; Drawing&rarr;CAD</h2>"
+            f"<p class=\"sub\">orchestrator v0.1</p><hr>"
+            f"<p><a class=\"btn\" href=\"/\">← 폼으로 돌아가기</a></p></div>"
+            f"<div class=\"main\"><h2 style=\"color:#f87171;\">오류</h2>"
+            f"<div class=\"card\"><p>{html.escape(message)}</p></div></div></div>")
     return page("오류", body)
 
 
@@ -221,27 +401,195 @@ def safe_download_path(output_dir, requested):
     return candidate
 
 
-def result_page(output_dir, returncode, stdout_tail=""):
-    lines = []
-    if returncode == 0:
-        lines.append("<p><strong>실행 결과: 성공 (종료 코드 0)</strong></p>")
+def list_result_dirs(limit=12):
+    """Recent output folders next to the server cwd (for 'view without rerun').
+
+    Returns [{name, dir, ok|fail|unknown}] — newest report.txt first.
+    Never exposes file contents or keys, only folder names + PASS/FAIL.
+    """
+    cands = []
+    try:
+        entries = list(Path.cwd().iterdir())
+    except OSError:
+        return []
+    for path in entries:
+        # Any unreadable entry must be skipped, never crash the form:
+        # is_file()/stat() on a permission-denied folder raises OSError.
+        try:
+            if not path.is_dir():
+                continue
+            report = path / "report.txt"
+            guidance = path / "guidance.txt"
+            step = path / "model.step"
+            fcstd = path / "model.fcstd"
+            if not (report.is_file() or guidance.is_file()
+                    or step.is_file() or fcstd.is_file()):
+                continue
+            status = "unknown"
+            try:
+                if report.is_file():
+                    text = report.read_text(encoding="utf-8", errors="replace")
+                    if "RESULT: PASS" in text:
+                        status = "ok"
+                    elif "RESULT: FAIL" in text:
+                        status = "fail"
+                elif guidance.is_file():
+                    status = "fail"
+            except OSError:
+                pass
+            try:
+                mtime = (report.stat().st_mtime if report.is_file()
+                         else path.stat().st_mtime)
+            except OSError:
+                mtime = 0
+            cands.append({"name": path.name, "dir": str(path.resolve()),
+                          "status": status, "mtime": mtime})
+        except OSError:
+            continue
+    cands.sort(key=lambda c: c["mtime"], reverse=True)
+    return cands[:limit]
+
+
+def list_sample_images():
+    """Bundle sample drawings (image/*.png|jpg) for one-click preview + run."""
+    out = []
+    try:
+        if not SAMPLE_DIR.is_dir():
+            return out
+        for path in sorted(SAMPLE_DIR.iterdir()):
+            if path.is_file() and path.suffix.lower() in (
+                    ".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                out.append({"name": path.name})
+    except OSError:
+        pass
+    return out
+
+
+def tris_payload(output_dir):
+    """Read tris.json inside output_dir, size-capped (8MB), or (None, err)."""
+    tris = (output_dir / "tris.json")
+    try:
+        resolved = tris.resolve()
+    except OSError as exc:
+        return None, str(exc)
+    try:
+        resolved.relative_to(output_dir)
+    except ValueError:
+        return None, "scope"
+    if not resolved.is_file():
+        return None, "missing"
+    try:
+        if resolved.stat().st_size > MAX_TRIS_BYTES:
+            return None, "too-large"
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+        verts, facets = data.get("verts"), data.get("facets")
+        if not isinstance(verts, list) or not isinstance(facets, list):
+            return None, "bad-shape"
+        return {"verts": verts, "facets": facets}, ""
+    except Exception as exc:
+        return None, str(exc)[:200]
+
+
+def sample_gallery_html():
+    """Clickable bundled sample drawings served via /sample?name=."""
+    samples = list_sample_images()
+    if not samples:
+        return ("<div class=\"card\"><h3>번들 샘플 도면</h3>"
+                "<p class=\"note\">image/ 폴더에 샘플이 없습니다.</p></div>")
+    cards = []
+    for item in samples:
+        name = item["name"]
+        query = urllib.parse.urlencode({"name": name})
+        cards.append(
+            f"<div class=\"card\"><h3>{html.escape(name)}</h3>"
+            f"<img class=\"shot\" src=\"/sample?{query}\" alt=\"{html.escape(name)}\">"
+            f"<p class=\"note\"><a href=\"/sample?{query}\" target=\"_blank\">원본 크기</a> · "
+            "실행 시 도면으로 쓰려면 이 파일을 왼쪽에서 직접 고르세요.</p></div>")
+    return ("<div class=\"card\"><h3>번들 샘플 도면 (클릭하면 원본 크기)</h3>"
+            "<p class=\"note\">image/ 폴더에 들어있는 도면입니다. 서버 파일이라 업로드 없이 바로 눈으로 확인됩니다.</p></div>"
+            "<div class=\"grid2\">" + "".join(cards) + "</div>")
+
+
+def recent_html():
+    """Recent runs table (server-side, no JS fetch needed) + JS fallback box."""
+    rows = ""
+    for item in list_result_dirs():
+        badge = ({"ok": "<span class=\"status-ok\">PASS</span>",
+                  "fail": "<span class=\"status-err\">FAIL</span>"}.get(
+                      item["status"], "<span class=\"status-warn\">?</span>"))
+        query = urllib.parse.urlencode({"dir": item["dir"]})
+        rows += (f"<tr><td>{html.escape(item['name'])}</td><td>{badge}</td>"
+                 f"<td><a href=\"/result?{query}\">열기</a></td></tr>")
+    if rows:
+        table = (f"<table class=\"files\"><tr><th>출력 폴더</th><th>상태</th>"
+                 f"<th>바로 보기</th></tr>{rows}</table>")
     else:
-        lines.append(
-            f"<p><strong>실행 결과: 실패 (종료 코드 {returncode})</strong></p>"
-        )
-    lines.append(f"<p>출력 폴더: {html.escape(str(output_dir))}</p>")
+        table = "<p class=\"note\">최근 실행 기록이 없습니다. 위에서 도면을 골라 실행하세요.</p>"
+    outline_link = ""
+    try:
+        if OUTLINE_TOOL_PATH.is_file():
+            outline_link = ("<p class=\"note\">윤곽을 직접 그리고 싶으면 "
+                            "<a href=\"/outline-tool\" target=\"_blank\">윤곽 스냅 도구 열기</a>"
+                            " → JSON 다운 → 왼쪽 윤곽 첨부에 올리세요.</p>")
+    except OSError:
+        pass
+    return (f"<div class=\"card\"><h3>&#128193; 최근 실행 결과 바로 보기</h3>"
+            f"<p class=\"note\">재실행 없이 눈으로 확인. 새 결과도 아래 목록에 바로 뜹니다.</p>"
+            f"{table}{outline_link}"
+            "<div id=\"recentBox\" class=\"note\" style=\"display:none;\"></div></div>")
+
+
+def form_gallery_html():
+    """t1 bottom: recent runs + bundled samples (server-side, no JS needed)."""
+    return recent_html() + sample_gallery_html()
+
+
+def viewer_html(output_dir):
+    """Interactive canvas viewer block (viewer3d.js + /tris data)."""
+    query = urllib.parse.urlencode({"dir": str(output_dir)})
+    tris, err = tris_payload(output_dir)
+    if tris is None:
+        why = {"missing": "<code>tris.json</code> 없음 (freecadcmd 결과가 아닙니다).",
+               "too-large": "<code>tris.json</code> 8MB 초과 — 브라우저 보호를 위해 뷰어 생략.",
+               "scope": "범위 밖 경로.", "bad-shape": "<code>tris.json</code> 형식 오류."}.get(err, html.escape(err))
+        return ("<div class=\"card\"><h3>&#129521; 돌려보는 3D 뷰어</h3>"
+                f"<p class=\"note\">뷰어 없음 ({why} 아래 PNG 프리뷰를 보세요).</p></div>")
+    js_query = urllib.parse.urlencode({"v": str(VIEWER_JS_PATH.stat().st_mtime)}) \
+        if VIEWER_JS_PATH.is_file() else "v=1"
+    return f"""
+      <div class="card"><h3>&#129521; 돌려보는 3D 뷰어 (tris.json)</h3>
+      <p class="note">드래그 회전 · 휠 줌 · 버튼 시점 전환. CDN 없이 이 페이지 안에서만 돕니다.
+      facet {html.escape(str(len(tris['facets'])))}개 · 아래 PNG는 같은 형상의 정지 이미지입니다.</p>
+      <div class="viewer-wrap"><canvas id="viewer3d" width="900" height="420"></canvas>
+      <div class="viewer-bar" id="viewerBar">로딩 중…</div></div>
+      <div class="viewer-tools">
+        <button type="button" data-view="iso">ISO</button>
+        <button type="button" data-view="main">정면(큰 면)</button>
+        <button type="button" data-view="top">위</button>
+        <button type="button" data-view="side">옆</button>
+      </div>
+      <div class="kv" id="viewerMeta"></div></div>
+      <script>window.TRIS_URL='/tris?{query}';</script>
+      <script src="/viewer3d.js?{js_query}"></script>"""
+
+
+def result_page(output_dir, returncode, stdout_tail=""):
+    # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
+    # tabbed cards for input images, 3D previews, files/downloads, QA logs.
+    if returncode == 0:
+        banner = "<span class=\"status-ok\">✅ 성공 (종료 코드 0)</span>"
+    else:
+        banner = (f"<span class=\"status-err\">❌ 실패 "
+                  f"(종료 코드 {html.escape(str(returncode))})</span>")
+    report_text = ""
     report = output_dir / "report.txt"
     if report.is_file():
-        lines.append("<h2>report.txt</h2><pre>")
-        lines.append(html.escape(report.read_text(encoding="utf-8", errors="replace")))
-        lines.append("</pre>")
+        report_text = report.read_text(encoding="utf-8", errors="replace")
+    guidance_text = ""
     guidance = output_dir / "guidance.txt"
     if guidance.is_file():
-        lines.append("<h2>guidance.txt</h2><pre>")
-        lines.append(html.escape(guidance.read_text(encoding="utf-8", errors="replace")))
-        lines.append("</pre>")
-    # Visual section: input images and model previews, shown inline
-    # in the browser (via /view, not as downloads).
+        guidance_text = guidance.read_text(encoding="utf-8", errors="replace")
+
     def view_link(name):
         query = urllib.parse.urlencode({"dir": str(output_dir), "file": name})
         return f"/view?{query}"
@@ -254,40 +602,116 @@ def result_page(output_dir, returncode, stdout_tail=""):
     input_images = [n for n in image_files
                     if n.startswith("input_drawing") or n.startswith("input_outline")]
     previews = [n for n in image_files if n.startswith("preview_")]
-    if input_images:
-        lines.append("<h2>입력 이미지 (브라우저에서 보기)</h2>")
-        for name in input_images:
-            lines.append(
-                f"<p>{html.escape(name)}<br>"
-                f"<img src=\"{view_link(name)}\" "
-                f"alt=\"{html.escape(name)}\" style=\"max-width:100%;\"></p>")
+
+    # Pill summary from report.txt (verification line, if present).
+    pills = ""
+    for line in report_text.splitlines():
+        if line.startswith("Verification:"):
+            pills += (f"<span class=\"feat-pill\">"
+                      f"{html.escape(line.strip())}</span>")
+            break
+    if returncode == 0:
+        pills += "<span class=\"feat-pill\">.fcstd 본체</span>"
     if previews:
-        lines.append("<h2>결과 프리뷰 (눈으로 보기)</h2>")
-        lines.append("<p class=\"note\">STEP 테셀레이션에서 만든 음영 프리뷰입니다. "
-                     "치수 도면이 아니라 형상 확인용입니다.</p>")
-        for name in previews:
-            lines.append(
-                f"<p>{html.escape(name)}<br>"
-                f"<img src=\"{view_link(name)}\" "
-                f"alt=\"{html.escape(name)}\" style=\"max-width:100%;\"></p>")
-    lines.append("<h2>출력 파일</h2><ul>")
+        pills += (f"<span class=\"feat-pill\">프리뷰 "
+                  f"{html.escape(str(len(previews)))}장</span>")
+
+    def img_card(name, caption):
+        return (f"<div class=\"card\"><h3>{html.escape(name)}</h3>"
+                f"<p class=\"note\">{caption} 클릭하면 원본 크기로 새 탭에 열립니다.</p>"
+                f"<img class=\"shot\" src=\"{view_link(name)}\" "
+                f"alt=\"{html.escape(name)}\"></div>")
+
+    if input_images:
+        t1_cards = "".join(
+            img_card(n, "입력 도면 / 윤곽 (브라우저 보기)")
+            for n in input_images)
+    else:
+        t1_cards = ("<div class=\"card\"><p class=\"note\">"
+                    "입력 이미지가 없습니다.</p></div>")
+    if previews:
+        t2_cards = "".join(
+            img_card(n, "STEP 테셀레이션 음영 프리뷰 — 형상 확인용")
+            for n in previews)
+    else:
+        t2_cards = ("<div class=\"card\"><p class=\"note\">결과 프리뷰가 없습니다 "
+                    "(렌더 실패 — .fcstd / STEP 파일 자체는 위 목록을 확인).</p></div>")
+    t2_viewer = viewer_html(output_dir)
+
+    file_rows = ""
     if output_dir.is_dir():
         for path in sorted(output_dir.iterdir()):
             if path.is_file():
                 query = urllib.parse.urlencode(
                     {"dir": str(output_dir), "file": path.name}
                 )
-                lines.append(
-                    f"<li><a href=\"/download?{query}\">{html.escape(path.name)}</a> "
-                    f"({path.stat().st_size} bytes)</li>"
+                file_rows += (
+                    f"<tr><td>{html.escape(path.name)}</td>"
+                    f"<td>{path.stat().st_size}</td>"
+                    f"<td><a href=\"/download?{query}\">다운로드</a> · "
+                    f"<a href=\"/view?{query}\">보기</a></td></tr>"
                 )
-    lines.append("</ul>")
-    lines.append("<p><a href=\"/\">← 폼으로 돌아가기</a></p>")
-    if stdout_tail:
-        lines.append("<h2>실행 로그 (끝부분)</h2><pre>")
-        lines.append(html.escape(stdout_tail))
-        lines.append("</pre>")
-    return page("실행 결과", "".join(lines))
+    body = f"""
+<div class="layout">
+  <div class="sidebar">
+    <h2>&#11042; Drawing&rarr;CAD</h2>
+    <p class="sub">orchestrator v0.1 &middot; 실행 결과</p>
+    <hr>
+    <div class="card"><h3 style="font-size:14px;">실행 결과</h3><p>{banner}</p>
+    <p class="note">출력 폴더<br><code>{html.escape(str(output_dir))}</code></p>
+    <p><a class="btn" href="/">← 폼으로 돌아가기</a></p></div>
+  </div>
+  <div class="main">
+    <h2 style="color:#7eb8f7;font-size:22px;margin:0;">실행 결과</h2>
+    <p>{banner}</p>
+    <p>{pills}</p>
+    <div class="tabs">
+      <button type="button" class="tab-btn active" data-tab="r1">&#128008; 도면 인식</button>
+      <button type="button" class="tab-btn" data-tab="r2">&#129521; 파라미터 &amp; 3D</button>
+      <button type="button" class="tab-btn" data-tab="r3">&#128295; FreeCAD 내보내기</button>
+      <button type="button" class="tab-btn" data-tab="r4">&#128269; QA 로그</button>
+    </div>
+    <div class="tab-panel active" id="r1">
+      <div class="card"><h3>🖼 원본 / 입력 이미지</h3>
+      <p class="note">출력 폴더의 <code>input_drawing.*</code> / <code>input_outline.*</code> 을 브라우저에서 바로 봅니다.</p></div>
+      <div class="grid2">{t1_cards}</div>
+    </div>
+    <div class="tab-panel" id="r2">
+      {t2_viewer}
+      <div class="grid2">{t2_cards}</div>
+    </div>
+    <div class="tab-panel" id="r3">
+      <div class="card"><h3>🔧 출력 파일</h3>
+      <table class="files"><tr><th>파일</th><th>bytes</th><th>링크</th></tr>{file_rows}</table></div>
+    </div>
+    <div class="tab-panel" id="r4">
+      <div class="grid2">
+        <div class="card"><h3>report.txt</h3><pre>{html.escape(report_text) if report_text else "(없음)"}</pre></div>
+        <div class="card"><h3>guidance.txt</h3><pre>{html.escape(guidance_text) if guidance_text else "(없음 — 성공 시 생기지 않습니다)"}</pre></div>
+      </div>
+      <div class="card"><h3>실행 로그 (끝부분)</h3><pre>{html.escape(stdout_tail) if stdout_tail else "(없음)"}</pre></div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){{
+  document.querySelectorAll('.tab-btn').forEach(function(b){{
+    b.addEventListener('click', function(){{
+      document.querySelectorAll('.tab-btn').forEach(function(x){{x.classList.remove('active');}});
+      document.querySelectorAll('.tab-panel').forEach(function(x){{x.classList.remove('active');}});
+      b.classList.add('active');
+      document.getElementById(b.dataset.tab).classList.add('active');
+    }});
+  }});
+  document.querySelectorAll('img.shot').forEach(function(img){{
+    img.addEventListener('click', function(){{
+      if (img.src) window.open(img.src, '_blank');
+    }});
+  }});
+}})();
+</script>
+"""
+    return page("실행 결과", body)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -295,6 +719,13 @@ class Handler(BaseHTTPRequestHandler):
     # The form sends the key only in the POST body, which is never logged.
     def log_message(self, fmt, *args):
         sys.stderr.write(f"{self.address_string()} {fmt % args}\n")
+
+    def _send_bytes(self, data, mime):
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -305,6 +736,76 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            return
+        if parsed.path == "/result":
+            # Reopen a previous output folder without rerunning.
+            # ?dir=<absolute path> only; resolved and must hold a report.
+            query = urllib.parse.parse_qs(parsed.query)
+            raw_dir = query.get("dir", [""])[0]
+            output_dir = Path(raw_dir).resolve() if raw_dir else None
+            ok = (output_dir is not None and output_dir.is_dir()
+                  and ((output_dir / "report.txt").is_file()
+                       or (output_dir / "guidance.txt").is_file()
+                       or (output_dir / "model.step").is_file()))
+            if not ok:
+                self._send_html(400, error_page("결과 폴더를 열 수 없습니다."))
+                return
+            data = result_page(output_dir, 0 if (output_dir / "report.txt").is_file()
+                               and "RESULT: PASS" in (output_dir / "report.txt").read_text(
+                                   encoding="utf-8", errors="replace") else 1)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/tris":
+            # 3D viewer data: tris.json inside the output dir only, capped.
+            query = urllib.parse.parse_qs(parsed.query)
+            raw_dir = query.get("dir", [""])[0]
+            output_dir = Path(raw_dir).resolve() if raw_dir else None
+            if output_dir is None:
+                self.send_error(400, "Bad dir")
+                return
+            payload, err = tris_payload(output_dir)
+            if payload is None:
+                self.send_error(404, f"tris unavailable: {err}")
+                return
+            data = json.dumps(payload).encode("utf-8")
+            self._send_bytes(data, "application/json")
+            return
+        if parsed.path == "/sample":
+            # Bundled sample drawings from image/ (read-only).
+            query = urllib.parse.parse_qs(parsed.query)
+            name = query.get("name", [""])[0]
+            if not name or ".." in Path(name).parts or "/" in name or "\\" in name:
+                self.send_error(400, "Bad name")
+                return
+            target = (SAMPLE_DIR / name).resolve()
+            try:
+                target.relative_to(SAMPLE_DIR.resolve())
+            except ValueError:
+                self.send_error(400, "Bad name")
+                return
+            if not target.is_file():
+                self.send_error(404, "Not found")
+                return
+            mime, _enc = mimetypes.guess_type(str(target))
+            if not (mime or "").startswith("image/"):
+                self.send_error(400, "Not an image")
+                return
+            self._send_bytes(target.read_bytes(), mime)
+            return
+        if parsed.path == "/viewer3d.js":
+            if not VIEWER_JS_PATH.is_file():
+                self.send_error(404, "Not found")
+                return
+            self._send_bytes(VIEWER_JS_PATH.read_bytes(),
+                             "application/javascript")
+            return
+        if parsed.path == "/outline-tool":
+            # Serve the bundled snap tool (same-origin, opens in new tab).
+            if not OUTLINE_TOOL_PATH.is_file():
+                self.send_error(404, "Not found")
+                return
+            self._send_bytes(OUTLINE_TOOL_PATH.read_bytes(),
+                             "text/html; charset=utf-8")
             return
         if parsed.path == "/view":
             # Inline image view (no attachment header), same safe-path
