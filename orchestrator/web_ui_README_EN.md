@@ -72,8 +72,8 @@ Result (O/X/?/-). Drawing value = the value the LLM read from the
 drawing and wrote into the macro (a D-dimension from the ask-first
 step, or a user-confirmed answer); modeling value = measured from
 STEP (bbox sizes, cylinder diameters, solids, validity, volume).
-O = within 0.1 mm, X = differs, ? = cannot be mapped automatically,
-- = reference only. Note: the drawing value is NOT a directly
+O = within 0.01 mm, X = differs, ? = cannot be mapped automatically,
+~ = reference only. Note: the drawing value is NOT a directly
 measured drawing truth. If the LLM misread the drawing, both
 columns can be wrong together. The table checks "was the intent
 built?", not "does it equal the drawing truth?".

@@ -42,7 +42,7 @@ python3 run_pipeline.py --drawing my_drawing.png --text "부품 설명" --output
 report.txt에도 줄로 적힙니다. 도면값은 LLM이 도면에서 읽어
 매크로에 쓴 값(질문 먼저 D치수, 확인된 답변 포함), 모델링값은
 STEP 측정값(bbox 크기, 원통 지름, 솔리드, 유효성, 부피)입니다.
-O는 0.1mm 이내, X는 다름, ?는 자동 매핑 불가, -는 참고용.
+O는 0.01mm 이내, X는 다름, ?는 자동 매핑 불가, ~는 참고용.
 축 매핑은 원칙대로입니다 (축 방향 = X, 지름 = 원통면).
 질문 먼저 단계에서는 D치수 목록을 dimensions.json에 저장하고,
 위치가 있으면 drawing_numbered.png에 빨간 번호 배지를 찍습니다

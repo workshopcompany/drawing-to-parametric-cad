@@ -403,8 +403,8 @@ def run_freecadcmd(freecadcmd, macro_path, log_path):
 # if the LLM misread the drawing, both columns can be wrong together.
 # The table therefore checks build-vs-intent (did FreeCAD actually
 # build what the macro said?), plus the user-confirmed Q&A values
-# when they are present in --text. Tolerance: 0.1 mm.
-MATCH_TOL = 0.1
+# when they are present in --text. Tolerance: 0.01 mm.
+MATCH_TOL = 0.01
 
 
 def _closest(values, target):
@@ -416,7 +416,7 @@ def _closest(values, target):
 def _match_row(no, item, drawing, modeling, tol=MATCH_TOL):
     if drawing is None:
         return {"no": no, "item": item, "drawing": None,
-                "modeling": modeling, "result": "-"}
+                "modeling": modeling, "result": "~"}
     if modeling is None:
         return {"no": no, "item": item, "drawing": drawing,
                 "modeling": None, "result": "?"}
@@ -425,9 +425,11 @@ def _match_row(no, item, drawing, modeling, tol=MATCH_TOL):
                 "modeling": modeling,
                 "result": "O" if modeling == drawing else "X"}
     diff = abs(float(modeling) - float(drawing))
+    # 1e-9 epsilon: 22.01 - 22.0 is 0.010000000000002 in binary
+    # floating point, which must still count as "within 0.01".
     return {"no": no, "item": item, "drawing": drawing,
             "modeling": modeling,
-            "result": "O" if diff <= tol else "X"}
+            "result": "O" if diff <= tol + 1e-9 else "X"}
 
 
 def _keyword_target(name):

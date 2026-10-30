@@ -231,15 +231,15 @@ S = {
                       "answer). It is NOT a directly measured drawing "
                       "truth: if the LLM misread the drawing, both "
                       "columns can be wrong together. Modeling value = "
-                      "measured from the STEP file. O = within 0.1 mm, "
+                      "measured from the STEP file. O = within 0.01 mm, "
                       "X = differs, ? = cannot be mapped automatically, "
-                      "- = reference only.",
+                      "~ = reference only.",
                       "도면값 = LLM이 도면에서 읽어 매크로에 쓴 값 (질문 "
                       "먼저 단계의 D치수, 또는 사용자가 확인한 답변). "
                       "도면을 직접 측정한 진값이 아닙니다. LLM이 도면을 "
                       "잘못 읽으면 양쪽이 같이 틀릴 수 있습니다. 모델링값 "
-                      "= STEP 파일에서 측정한 값. O = 0.1mm 이내, X = "
-                      "다름, ? = 자동 매핑 불가, - = 참고용."),
+                      "= STEP 파일에서 측정한 값. O = 0.01mm 이내, X = "
+                      "다름, ? = 자동 매핑 불가, ~ = 참고용."),
     "matching_numbered_note": ("Numbered drawing below: red badges are the "
                                "D-numbers from the ask-first step. Badge "
                                "positions are APPROXIMATE (LLM vision "
@@ -262,6 +262,18 @@ S = {
     "th_drawing": ("Drawing value", "도면값"),
     "th_modeling": ("Modeling value", "모델링값"),
     "th_result": ("Result", "결과"),
+    "matching_legend": ("O = within 0.01 mm, X = differs, "
+                       "? = cannot be mapped automatically, "
+                       "~ = reference only.",
+                       "O는 0.01mm 이내, X는 다름, ?는 자동 매핑 불가, "
+                       "~는 참고용."),
+    "matching_disclaimer": ("Drawing value is the value read by the LLM, "
+                            "or an answer you confirmed. This checks "
+                            "\u201cwas it built as intended?\u201d, not proof "
+                            "that it \u201cequals the drawing truth\u201d.",
+                            "도면값은 LLM이 읽은 값, 또는 네가 확인한 답이야. "
+                            "\u201c의도한 대로 만들었나\u201d를 보는 거지, "
+                            "\u201c도면 진값과 같나\u201d를 증명이 아님."),
     "matching_none": ("No matching table in this result (older run). "
                       "Solids, validity, volume, and bbox are in "
                       "report.txt.",
@@ -1237,7 +1249,9 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       {numbered_img}
       <div class="card"><h3>&#10003; {tr(lang, 'matching_title')}</h3>
       <p class="note">{tr(lang, 'matching_note')}</p>
-      {matching_table}</div>
+      {matching_table}
+      <p class="note">{tr(lang, 'matching_legend')}</p>
+      <p class="note">{tr(lang, 'matching_disclaimer')}</p></div>
     </div>
     <div class="tab-panel" id="r4">
       <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_text) if questions_text else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>

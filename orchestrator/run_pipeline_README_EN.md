@@ -83,8 +83,8 @@ table goes to matching.json and as lines in report.txt. Drawing
 values are the LLM's reading from the drawing (macro parameters,
 ask-first D-dimensions, confirmed answers); modeling values are
 measured from STEP (bbox sizes, cylinder diameters, solids,
-validity, volume). O = within 0.1 mm, X = differs, ? = cannot be
-mapped automatically, - = reference only. Axis mapping follows
+validity, volume). O = within 0.01 mm, X = differs, ? = cannot be
+mapped automatically, ~ = reference only. Axis mapping follows
 the principles (axial = X, diameters = cylinder faces). In the
 ask-first step, the D-dimension list goes to dimensions.json, and
 if positions exist, red numbered badges are drawn into
