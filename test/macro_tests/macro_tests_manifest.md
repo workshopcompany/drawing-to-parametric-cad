@@ -62,8 +62,8 @@ for the user to confirm, not a push.
 
 | Local file | Proposed GitHub path | Disposition | Reason |
 |---|---|---|---|
-| MACRO_PRINCIPLES_EN.md (8.4 KB) | MACRO_PRINCIPLES_EN.md (repo root) | (b) separate, repo root | Program principles file, shared by all three tests. Reports link to it; do not copy it into each test folder. |
-| GEAR_CREATION_REFERENCE.md (4.2 KB) | GEAR_CREATION_REFERENCE.md (repo root) | (b) separate, repo root | Gear-only reference, included in prompts only when the drawing contains a gear. Link, do not duplicate. |
+| MACRO_PRINCIPLES_EN.md (8.4 KB) | orchestrator/MACRO_PRINCIPLES_EN.md (moved Oct 29, 2026) | (b) separate, orchestrator/ | Program principles file, shared by all three tests. Reports link to it; do not copy it into each test folder. |
+| GEAR_CREATION_REFERENCE.md (4.2 KB) | orchestrator/GEAR_CREATION_REFERENCE.md (moved Oct 29, 2026) | (b) separate, orchestrator/ | Gear-only reference, included in prompts only when the drawing contains a gear. Link, do not duplicate. |
 | GEAR_QA_CONFIRMED.md (5.4 KB) | GEAR_QA_CONFIRMED.md (repo root) | (b) separate, repo root | Confirmed Q&A for test 2. Link from macro_test2_report.md. |
 | NEW_DRAWING_QA_DRAFT.md (13 KB) | NEW_DRAWING_QA_DRAFT.md (repo root) | (b) separate, repo root, DRAFT note | Q&A draft for test 3, including the confirmed centre-peak correction. Still called DRAFT because test 3 itself is not yet closed; link with that note, do not present it as confirmed-final. |
 
