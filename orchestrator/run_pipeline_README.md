@@ -68,6 +68,10 @@ PENDING이 되고, 답하면 다시 만듭니다.
 ## 질문과 임시 결과
 - 매크로에 Q1~Q9 같은 질문이 있으면, `<output-dir>/questions.txt`로
   뽑히고 report.txt에도 적혀. 결과 페이지 QA 탭에서 바로 보여.
+- questions.txt에는 열린 질문만 들어가. 이미 답했거나 확정됐거나
+  built exact인 항목, 다른 질문을 가리키는 말(`see Q30`)은 질문에서
+  빠져. LLM이 닫힌 항목을 Q-line으로 다시 적지 않도록 프롬프트에도
+  규칙이 있어.
 - 질문이 있는데도 솔리드가 만들어지면, 종료 코드는 0이지만 결과는
   성공이 아니야. report.txt에는 “RESULT: QUESTIONS PENDING”으로
   적히고, 결과 페이지 배너에도 “질문 대기 중 — 성공이 아닙니다”로

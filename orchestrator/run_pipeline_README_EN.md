@@ -115,6 +115,10 @@ answering rebuilds.
 - If the macro asks Q1–Q9 questions, they are extracted to
   `<output-dir>/questions.txt` and listed in `report.txt`, and shown
   on the web UI QA tab.
+- questions.txt holds open questions only. Items already answered,
+  confirmed, or built exact, and pointers to another question
+  (`see Q30`), are left out. The prompt also tells the LLM never to
+  list a closed item as a Q-line.
 - If a solid is built while questions are unanswered, the exit code
   is still 0, but the result is NOT a success. `report.txt` says
   "RESULT: QUESTIONS PENDING", and the result page banner says

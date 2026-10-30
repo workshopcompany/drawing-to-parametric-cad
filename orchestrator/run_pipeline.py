@@ -73,6 +73,11 @@ MACRO_INSTRUCTION = (
     "drawing shows a gear, knurl, thread, bore, notch, or chamfer you "
     "cannot dimension exactly, you MUST ask about it in a Q-line, "
     "even if you also build a provisional version. "
+    "Q-lines are for OPEN questions only: a value already answered by "
+    "the user, confirmed, or built exact is NOT a question - never list "
+    "it as a Q-line, never restart numbering for it. Put "
+    "already-answered/confirmed items in a separate 'Confirmed/built' "
+    "note, not in Q-lines. "
     "Safety: do NOT use subprocess, socket, urllib, requests, shutil, "
     "eval, exec, open, os.system, os.environ, or AttachmentOffset. "
     "For file paths, plain string concatenation or os.path.join only, "
@@ -351,6 +356,24 @@ def safety_check(macro_text):
     return hits
 
 
+def _is_closed_status_line(text):
+    """True if a Q-line is a status recap, not an open question.
+
+    The LLM sometimes re-lists already-settled items in its question
+    block (e.g. "Q1: Q26: answered and confirmed before, built exact")
+    or points at another question ("Q28: ... see Q30"). Those are not
+    open questions and must not reach questions.txt - only lines with
+    a real unmet need stay. A line without "?" that says "confirmed"
+    or points at another question is a recap, not a question.
+    """
+    low = text.lower()
+    if "built exact" in low or "not repeated" in low or "already answered" in low:
+        return True
+    if "?" not in text and ("confirmed" in low or re.search(r"see\s+q\d+", low)):
+        return True
+    return False
+
+
 def extract_questions(content, macro_text):
     """Extract unanswered design questions (Q1, Q2, ...) from a response.
 
@@ -359,7 +382,10 @@ def extract_questions(content, macro_text):
     ("print(\"Q1 ...\")"). Accepted labels: Q1, Question 1, with a
     colon, dot, dash, or closing paren after the number. Inline
     references such as "pending Q3/Q6" are NOT questions and are
-    ignored. Returns [(label, text), ...] sorted by number, deduped.
+    ignored. Lines that only recap a closed item (built exact,
+    confirmed, already answered, or a "see Q<n>" pointer with no
+    question mark) are skipped by _is_closed_status_line. Returns
+    [(label, text), ...] sorted by number, deduped.
     """
     questions = {}
     for text in (content, macro_text):
@@ -378,6 +404,8 @@ def extract_questions(content, macro_text):
                 continue
             label = f"Q{m.group(1)}"
             question = m.group(2).strip().rstrip('")').strip()
+            if _is_closed_status_line(question):
+                continue
             if label not in questions and len(question) > 3:
                 questions[label] = question[:500]
     return [(label, questions[label])
