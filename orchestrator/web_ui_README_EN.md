@@ -63,6 +63,34 @@ the sidebar for the Korean UI, and the same link on a result page
 to switch there (`?lang=ko`). Click "English" to switch back. The
 choice travels with the form's hidden field to the result page.
 
+## "Modeling complete", not "success", plus a matching table
+The old "Success" label is now "Modeling complete". The gate is
+still only solids == 1 and valid True; it does NOT mean "same as
+the drawing". The result page has a new "Drawing ↔ Modeling match"
+tab with a table: No. | Item | Drawing value | Modeling value |
+Result (O/X/?/-). Drawing value = the value the LLM read from the
+drawing and wrote into the macro (a D-dimension from the ask-first
+step, or a user-confirmed answer); modeling value = measured from
+STEP (bbox sizes, cylinder diameters, solids, validity, volume).
+O = within 0.1 mm, X = differs, ? = cannot be mapped automatically,
+- = reference only. Note: the drawing value is NOT a directly
+measured drawing truth. If the LLM misread the drawing, both
+columns can be wrong together. The table checks "was the intent
+built?", not "does it equal the drawing truth?".
+
+## Numbered drawing (D1, D2, …)
+In the ask-first step, the LLM lists dimensions it can read as
+"D1: outer diameter = 22 mm @ (0.75, 0.20)". (x, y) is the
+approximate position on the drawing image (0-1, origin top-left).
+The pipeline draws red numbered badges at those positions into
+drawing_numbered.png and saves the list in dimensions.json. The
+matching tab shows the numbered drawing together with the table.
+Badge positions are LLM vision estimates and can be off. The table
+is authoritative; check badges against the original drawing. The
+numbered drawing only comes from ask-first runs, and it is copied
+into the new folder on Continue work. Older result folders have
+none.
+
 ## Ask first (on by default) — the back-and-forth loop
 "Ask questions first" is on by default. The first run builds no
 model and only extracts questions (report says "ASK-FIRST", no

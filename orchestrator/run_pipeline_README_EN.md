@@ -75,6 +75,22 @@ run itself does not fail, and the report says "Previews: unavailable".
 - Design/dimension questions are never self-fixed: the run stops
   instead of inventing a dimension. Answer the question and rerun.
 
+## Modeling complete + matching table (matching.json)
+The word "success" is no longer used. The gate is only STEP
+solids == 1 and valid True, and the result is "RESULT: MODELING
+COMPLETE". It does NOT mean "same as the drawing". The matching
+table goes to matching.json and as lines in report.txt. Drawing
+values are the LLM's reading from the drawing (macro parameters,
+ask-first D-dimensions, confirmed answers); modeling values are
+measured from STEP (bbox sizes, cylinder diameters, solids,
+validity, volume). O = within 0.1 mm, X = differs, ? = cannot be
+mapped automatically, - = reference only. Axis mapping follows
+the principles (axial = X, diameters = cylinder faces). In the
+ask-first step, the D-dimension list goes to dimensions.json, and
+if positions exist, red numbered badges are drawn into
+drawing_numbered.png (skipped if PIL is missing or no positions;
+positions are estimates).
+
 ## Ask first (--ask-first)
 With `--ask-first`, the first run builds no model and only extracts
 questions. The LLM is told "no macro, no code, questions only in

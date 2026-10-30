@@ -213,13 +213,60 @@ S = {
     "view_top": ("Top", "위"),
     "view_side": ("Side", "옆"),
     # result page
-    "success": ("✅ Success (exit code 0)", "✅ 성공 (종료 코드 0)"),
+    "success": ("✅ Modeling complete (exit code 0)",
+                "✅ 모델링 생성완료 (종료 코드 0)"),
     "failure": ("❌ Failed (exit code {code})",
                 "❌ 실패 (종료 코드 {code})"),
-    "questions_pending": ("❓ Questions pending — NOT a success "
-                          "(answer and continue, see questions.txt)",
-                          "❓ 질문 대기 중 — 성공이 아닙니다 "
+    "questions_pending": ("❓ Questions pending — modeling complete, "
+                          "not a success (answer and continue, see "
+                          "questions.txt)",
+                          "❓ 질문 대기 중 — 모델링 생성완료, 성공 아님 "
                           "(답변하고 계속 작업하세요, questions.txt 확인)"),
+    "tab_matching": ("Drawing ↔ Modeling match", "도면 ↔ 모델링 매칭"),
+    "matching_title": ("Drawing ↔ Modeling matching table",
+                        "도면 ↔ 모델링 매칭표"),
+    "matching_note": ("Drawing value = the value the LLM read from the "
+                      "drawing and wrote into the macro (or a D-dimension "
+                      "from the ask-first step, or a user-confirmed "
+                      "answer). It is NOT a directly measured drawing "
+                      "truth: if the LLM misread the drawing, both "
+                      "columns can be wrong together. Modeling value = "
+                      "measured from the STEP file. O = within 0.1 mm, "
+                      "X = differs, ? = cannot be mapped automatically, "
+                      "- = reference only.",
+                      "도면값 = LLM이 도면에서 읽어 매크로에 쓴 값 (질문 "
+                      "먼저 단계의 D치수, 또는 사용자가 확인한 답변). "
+                      "도면을 직접 측정한 진값이 아닙니다. LLM이 도면을 "
+                      "잘못 읽으면 양쪽이 같이 틀릴 수 있습니다. 모델링값 "
+                      "= STEP 파일에서 측정한 값. O = 0.1mm 이내, X = "
+                      "다름, ? = 자동 매핑 불가, - = 참고용."),
+    "matching_numbered_note": ("Numbered drawing below: red badges are the "
+                               "D-numbers from the ask-first step. Badge "
+                               "positions are APPROXIMATE (LLM vision "
+                               "estimates), not measured locations. The "
+                               "table is authoritative; check badges "
+                               "against the original drawing.",
+                               "아래 번호 도면: 빨간 배지는 질문 먼저 단계의 "
+                               "D번호입니다. 배지 위치는 대략적인 위치"
+                               "(LLM 비전 추정치)이며 측정 위치가 아닙니다. "
+                               "표가 기준이고, 배지는 원본 도면과 대조해 "
+                               "확인하세요."),
+    "matching_no_numbered": ("No numbered drawing in this result. Run "
+                             "with Ask questions first to get a numbered "
+                             "drawing; this table then uses the D-numbers.",
+                             "이 결과에는 번호 도면이 없습니다. 질문 먼저로 "
+                             "실행하면 번호 도면이 생기고, 표도 D번호를 "
+                             "씁니다."),
+    "th_no": ("No.", "번호"),
+    "th_item": ("Item", "항목"),
+    "th_drawing": ("Drawing value", "도면값"),
+    "th_modeling": ("Modeling value", "모델링값"),
+    "th_result": ("Result", "결과"),
+    "matching_none": ("No matching table in this result (older run). "
+                      "Solids, validity, volume, and bbox are in "
+                      "report.txt.",
+                      "이 결과에는 매칭표가 없습니다 (예전 실행). 솔리드, "
+                      "유효성, 부피, bbox는 report.txt에 있습니다."),
     "askfirst_banner": ("⏳ Ask-first done — no model yet, press "
                         "Continue work to build",
                         "⏳ 질문 먼저 완료 — 아직 모델이 없습니다, "
@@ -816,9 +863,10 @@ def list_result_dirs(limit=12):
             try:
                 if report.is_file():
                     text = report.read_text(encoding="utf-8", errors="replace")
-                    if "RESULT: QUESTIONS PENDING" in text:
+                    if "QUESTIONS PENDING" in text:
                         status = "questions"
-                    elif "RESULT: PASS" in text:
+                    elif ("RESULT: MODELING COMPLETE" in text
+                          or "RESULT: PASS" in text):
                         status = "ok"
                     elif "RESULT: FAIL" in text:
                         status = "fail"
@@ -1085,6 +1133,56 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
                     f"{tr(lang, 'preview_none')}</p></div>")
     t2_viewer = viewer_html(output_dir, lang)
 
+    # Matching tab: numbered drawing + drawing/modeling/O-X table.
+    matching_rows = []
+    matching_path = output_dir / "matching.json"
+    if matching_path.is_file():
+        try:
+            matching_rows = json.loads(matching_path.read_text(
+                encoding="utf-8"))
+        except Exception:
+            matching_rows = []
+    matching_table = ""
+    if matching_rows:
+        tr_rows = ""
+        for row in matching_rows:
+            res = row.get("result", "-")
+            cls = {"O": "status-ok", "X": "status-err"}.get(
+                res, "status-warn")
+            def _fmt(v):
+                if v is None:
+                    return "—"
+                if isinstance(v, bool):
+                    return "True" if v else "False"
+                if isinstance(v, float):
+                    return f"{v:.2f}"
+                return html.escape(str(v))
+            tr_rows += (
+                f"<tr><td>{html.escape(str(row.get('no', '—')))}</td>"
+                f"<td>{html.escape(str(row.get('item', '')))}</td>"
+                f"<td>{_fmt(row.get('drawing'))}</td>"
+                f"<td>{_fmt(row.get('modeling'))}</td>"
+                f"<td><span class=\"{cls}\">{html.escape(str(res))}</span></td></tr>")
+        matching_table = (
+            f"<table class=\"files\"><tr><th>{tr(lang, 'th_no')}</th>"
+            f"<th>{tr(lang, 'th_item')}</th><th>{tr(lang, 'th_drawing')}</th>"
+            f"<th>{tr(lang, 'th_modeling')}</th><th>{tr(lang, 'th_result')}</th></tr>"
+            f"{tr_rows}</table>")
+    else:
+        matching_table = f"<p class=\"note\">{tr(lang, 'matching_none')}</p>"
+    numbered_img = ""
+    numbered_path = output_dir / "drawing_numbered.png"
+    if numbered_path.is_file():
+        numbered_img = (
+            f"<div class=\"card\"><h3>{tr(lang, 'matching_title')}</h3>"
+            f"<p class=\"note\">{tr(lang, 'matching_numbered_note')}</p>"
+            f"<img class=\"shot\" src=\"{view_link('drawing_numbered.png')}\" "
+            f"alt=\"numbered drawing\"></div>")
+    else:
+        numbered_img = (
+            f"<div class=\"card\"><p class=\"note\">"
+            f"{tr(lang, 'matching_no_numbered')}</p></div>")
+
     file_rows = ""
     if output_dir.is_dir():
         for path in sorted(output_dir.iterdir()):
@@ -1120,6 +1218,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <button type="button" class="tab-btn" data-tab="r2">&#129521; {tr(lang, 'tab_params')}</button>
       <button type="button" class="tab-btn" data-tab="r3">&#128295; {tr(lang, 'tab_export')}</button>
       <button type="button" class="tab-btn" data-tab="r4">&#128269; {tr(lang, 'tab_qa')}</button>
+      <button type="button" class="tab-btn" data-tab="r5">&#10003; {tr(lang, 'tab_matching')}</button>
     </div>
     <div class="tab-panel active" id="r1">
       <div class="card"><h3>🖼 {tr(lang, 'input_title')}</h3>
@@ -1133,6 +1232,12 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     <div class="tab-panel" id="r3">
       <div class="card"><h3>🔧 {tr(lang, 'files_title')}</h3>
       <table class="files"><tr><th>{tr(lang, 'th_file')}</th><th>{tr(lang, 'th_bytes')}</th><th>{tr(lang, 'th_link')}</th></tr>{file_rows}</table></div>
+    </div>
+    <div class="tab-panel" id="r5">
+      {numbered_img}
+      <div class="card"><h3>&#10003; {tr(lang, 'matching_title')}</h3>
+      <p class="note">{tr(lang, 'matching_note')}</p>
+      {matching_table}</div>
     </div>
     <div class="tab-panel" id="r4">
       <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_text) if questions_text else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
@@ -1370,6 +1475,23 @@ class Handler(BaseHTTPRequestHandler):
             if prev_questions_path.is_file():
                 prev_questions = prev_questions_path.read_text(
                     encoding="utf-8", errors="replace").strip()
+            prev_dims_text = ""
+            prev_dims_path = prev_dir / "dimensions.json"
+            if prev_dims_path.is_file():
+                try:
+                    _dims = json.loads(prev_dims_path.read_text(
+                        encoding="utf-8"))
+                    _lines = []
+                    for _d in _dims:
+                        _pos = ""
+                        if _d.get("x") is not None and _d.get("y") is not None:
+                            _pos = f" @ ({_d['x']}, {_d['y']})"
+                        _lines.append(
+                            f"{_d.get('id', 'D?')}: {_d.get('label', '')} = "
+                            f"{_d.get('value', '')} mm{_pos}")
+                    prev_dims_text = "\n".join(_lines)
+                except Exception:
+                    prev_dims_text = ""
             askfirst_no_questions = (
                 "ASK-FIRST" in prev_report and not prev_questions
                 and not (prev_dir / "model.fcstd").is_file())
@@ -1398,12 +1520,16 @@ class Handler(BaseHTTPRequestHandler):
             if prev_questions:
                 fields["notes"] = (
                     "Previous questions:\n" + prev_questions
+                    + ("\nNumbered drawing dimensions:\n" + prev_dims_text
+                       if prev_dims_text else "")
                     + "\nAnswers to the previous run's questions:\n"
                     + answers
                     + f"\n(Previous run folder: {prev_dir.name})")
             elif answers:
                 fields["notes"] = (
-                    "Answers to the previous run's questions:\n"
+                    ("Numbered drawing dimensions:\n" + prev_dims_text + "\n"
+                     if prev_dims_text else "")
+                    + "Answers to the previous run's questions:\n"
                     + answers
                     + f"\n(Previous run folder: {prev_dir.name})")
             else:
@@ -1481,6 +1607,15 @@ class Handler(BaseHTTPRequestHandler):
         # Never show the key: web_ui_run.log holds only the pipeline's
         # own output, which never prints the key, and this page shows
         # only report/guidance/file names, never the command or the key.
+        if parsed.path == "/answer" and prev_dir is not None:
+            for _name in ("dimensions.json", "drawing_numbered.png"):
+                _src = prev_dir / _name
+                _dst = output_dir / _name
+                if _src.is_file() and not _dst.is_file():
+                    try:
+                        shutil.copyfile(_src, _dst)
+                    except OSError:
+                        pass
         data = result_page(output_dir, result.returncode, lang=lang)
         self._send_html(200, data)
 

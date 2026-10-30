@@ -91,7 +91,15 @@ ASK_FIRST_INSTRUCTION = (
     "fill it with a provisional value in this step. If truly nothing "
     "is ambiguous, write exactly one line: NO QUESTIONS. Output ONLY "
     "the question list (or NO QUESTIONS) - no code fence, no macro, "
-    "no explanation."
+    "no explanation. "
+    "After the questions, add a numbered dimension list for the "
+    "dimensions you CAN read from the drawing, one per line, in "
+    "exactly this format: D1: <what it is> = <value> mm @ (x, y) - "
+    "where (x, y) is the APPROXIMATE position of that dimension on "
+    "the drawing image as fractions 0-1, origin top-left (for "
+    "example, D1: outer diameter = 22 mm @ (0.75, 0.20)). These "
+    "positions are estimates for numbering badges on the drawing; "
+    "if you cannot place a dimension, omit its @ (x, y) part."
 )
 
 # Safety: patterns rejected in a generated macro. The orchestrator itself
@@ -387,6 +395,244 @@ def run_freecadcmd(freecadcmd, macro_path, log_path):
     return result.returncode
 
 
+
+# ---- Drawing <-> modeling matching ----
+# "Drawing value" here means: the value the LLM read from the drawing
+# and wrote into the macro (or, for ask-first D-dimensions, the value
+# the LLM listed). It is NOT an independently measured drawing truth:
+# if the LLM misread the drawing, both columns can be wrong together.
+# The table therefore checks build-vs-intent (did FreeCAD actually
+# build what the macro said?), plus the user-confirmed Q&A values
+# when they are present in --text. Tolerance: 0.1 mm.
+MATCH_TOL = 0.1
+
+
+def _closest(values, target):
+    if not values:
+        return None
+    return min(values, key=lambda v: abs(v - target))
+
+
+def _match_row(no, item, drawing, modeling, tol=MATCH_TOL):
+    if drawing is None:
+        return {"no": no, "item": item, "drawing": None,
+                "modeling": modeling, "result": "-"}
+    if modeling is None:
+        return {"no": no, "item": item, "drawing": drawing,
+                "modeling": None, "result": "?"}
+    if isinstance(drawing, bool):
+        return {"no": no, "item": item, "drawing": drawing,
+                "modeling": modeling,
+                "result": "O" if modeling == drawing else "X"}
+    diff = abs(float(modeling) - float(drawing))
+    return {"no": no, "item": item, "drawing": drawing,
+            "modeling": modeling,
+            "result": "O" if diff <= tol else "X"}
+
+
+def _keyword_target(name):
+    """Map a dimension name/question to a measurement kind."""
+    u = name.upper()
+    if "RADIUS" in u:
+        return "radius"
+    if "DIA" in u or "DIAMETER" in u or "BORE" in u or "OUTER" in u:
+        return "dia"
+    if "LENGTH" in u or "TOTAL" in u or "AXIAL" in u:
+        return "length"
+    if "WIDTH" in u:
+        return "width"
+    if "HEIGHT" in u or "THICK" in u or "DEPTH" in u:
+        return "height"
+    return None
+
+
+def _target_modeling(kind, verification):
+    if kind == "radius":
+        c = _closest(verification.get("cyl_diams", []), 0)
+        # radius rows are converted to diameter before calling here
+        return None
+    if kind == "dia":
+        return None  # handled by caller (needs the expected value)
+    if kind == "length":
+        return verification.get("size_x")
+    if kind == "width":
+        return verification.get("size_y")
+    if kind == "height":
+        return verification.get("size_z")
+    return None
+
+
+def parse_macro_dimensions(macro_text):
+    """Parse top-level numeric assignments from a macro.
+
+    Returns [(NAME, value), ...] deduped by NAME, first wins.
+    Only names that look like dimensions are kept out of the
+    blocklist; the caller decides which ones map to a measurement.
+    """
+    seen = {}
+    block = {"MAX_TOKENS", "TOLERANCE", "TOL", "STEP_COUNT", "COUNT"}
+    for line in macro_text.splitlines():
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$", line)
+        if not m:
+            continue
+        name, value = m.group(1).upper(), float(m.group(2))
+        if name in block or name in seen:
+            continue
+        if not (0.01 <= value <= 1000):
+            continue
+        seen[name] = value
+    return list(seen.items())
+
+
+def parse_numbered_dimensions(text):
+    """Parse ask-first / answer D-lines: D1: label = value @ (x, y).
+
+    Position (x, y) is a 0-1 image fraction, origin top-left, and is
+    APPROXIMATE (LLM vision estimate). Returns a list of dicts.
+    """
+    dims = []
+    for line in text.splitlines():
+        m = re.match(r"\s*(?:#\s*)?D(\d+)\s*[:\-\.]\s*(.+)", line.strip())
+        if not m:
+            continue
+        rest = m.group(2).strip()
+        pos = None
+        pm = re.search(r"@\s*\(\s*([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)\s*\)", rest)
+        if pm:
+            try:
+                pos = (float(pm.group(1)), float(pm.group(2)))
+            except ValueError:
+                pos = None
+            rest = rest[:pm.start()].strip(" -:")
+        vm = re.search(r"([0-9]+(?:\.[0-9]+)?)", rest)
+        if not vm:
+            continue
+        try:
+            value = float(vm.group(1))
+        except ValueError:
+            continue
+        label = rest[:vm.start()].strip(" =:") or f"D{m.group(1)}"
+        dims.append({"id": f"D{m.group(1)}", "label": label,
+                     "value": value, "x": pos[0] if pos else None,
+                     "y": pos[1] if pos else None})
+    # Dedupe by id, first wins.
+    out, seen_ids = [], set()
+    for d in dims:
+        if d["id"] not in seen_ids:
+            seen_ids.add(d["id"])
+            out.append(d)
+    return out
+
+
+def annotate_drawing(drawing_path, dims, out_path):
+    """Draw numbered badges on a copy of the drawing (PIL, best-effort).
+
+    Positions are LLM estimates, so badges are approximate: they mark
+    roughly where the LLM thinks the dimension lives, not a measured
+    location. Returns True if the image was written, False otherwise
+    (PIL missing, unreadable image, or no positioned dimensions).
+    """
+    positioned = [d for d in dims if d.get("x") is not None
+                  and d.get("y") is not None]
+    if not positioned:
+        return False
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return False
+    try:
+        img = Image.open(drawing_path).convert("RGB")
+    except Exception:
+        return False
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    r = max(14, min(w, h) // 40)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", r)
+    except Exception:
+        font = ImageFont.load_default()
+    for d in positioned:
+        x = min(max(d["x"], 0.0), 1.0) * w
+        y = min(max(d["y"], 0.0), 1.0) * h
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=(220, 38, 38),
+                     outline=(255, 255, 255), width=2)
+        label = d["id"]
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        draw.text((x - tw / 2, y - th / 2), label, fill=(255, 255, 255),
+                  font=font)
+    try:
+        img.save(out_path)
+        return True
+    except Exception:
+        return False
+
+
+def build_matching(verification, macro_text, user_text):
+    """Build the drawing-vs-modeling table rows.
+
+    Row order: D-dimensions (ask-first / answer text) first, then
+    macro parameters not already covered, then always-present rows
+    (solids, valid, bbox sizes, cylinder diameters, volume).
+    """
+    rows = []
+    used_macro = set()
+    # D-dimensions from --text (ask-first list carried via /answer,
+    # or user notes written in D1: form).
+    d_dims = parse_numbered_dimensions(user_text or "")
+    for d in d_dims:
+        kind = _keyword_target(d["label"])
+        modeling = None
+        if kind == "dia":
+            modeling = _closest(verification.get("cyl_diams", []), d["value"])
+        elif kind == "radius":
+            modeling = _closest(verification.get("cyl_diams", []),
+                                d["value"] * 2)
+            if modeling is not None:
+                modeling = modeling / 2
+        elif kind in ("length", "width", "height"):
+            modeling = _target_modeling(kind, verification)
+        rows.append(_match_row(d["id"], d["label"], d["value"], modeling))
+    # Macro parameters.
+    for name, value in parse_macro_dimensions(macro_text):
+        kind = _keyword_target(name)
+        if kind is None:
+            continue
+        # Skip if a D-row already covers this kind+value.
+        covered = False
+        for d in d_dims:
+            if _keyword_target(d["label"]) == kind and abs(d["value"] - value) <= MATCH_TOL:
+                covered = True
+                break
+        if covered:
+            continue
+        modeling = None
+        drawing = value
+        if kind == "dia":
+            modeling = _closest(verification.get("cyl_diams", []), value)
+        elif kind == "radius":
+            c = _closest(verification.get("cyl_diams", []), value * 2)
+            modeling = (c / 2) if c is not None else None
+            drawing = value
+        elif kind in ("length", "width", "height"):
+            modeling = _target_modeling(kind, verification)
+        if modeling is None and kind not in ("dia", "radius"):
+            continue
+        rows.append(_match_row("—", name, drawing, modeling))
+    # Always-present rows.
+    rows.append(_match_row("—", "Solids (count)", 1, verification.get("solids")))
+    rows.append(_match_row("—", "Valid solid", True, verification.get("valid")))
+    for label, key in (("BBox size X", "size_x"), ("BBox size Y", "size_y"),
+                       ("BBox size Z", "size_z")):
+        rows.append(_match_row("—", label, None, verification.get(key)))
+    cyl = verification.get("cyl_diams", [])
+    rows.append(_match_row("—", "Cylinder diameters found", None,
+                           ", ".join(f"{v:.2f}" for v in cyl) if cyl else None))
+    rows.append(_match_row("—", "Volume (reference only)", None,
+                           verification.get("volume")))
+    return rows
+
+
 def verify_step(freecadcmd, step_path, output_dir):
     """Independent STEP check. Returns a dict of measured values.
 
@@ -412,11 +658,20 @@ def verify_step(freecadcmd, step_path, output_dir):
         "    json.dump({'verts': [[v.x, v.y, v.z] for v in verts],\n"
         "               'facets': [list(f) for f in _facets]}, fh)\n"
         "xs = [v.x for v in verts]; ys = [v.y for v in verts]; zs = [v.z for v in verts]\n"
+        "cyl_diams = []\n"
+        "for _f in shape.Faces:\n"
+        "    try:\n"
+        "        _s = _f.Surface\n"
+        "        if _s.TypeId == 'Part::GeomCylinder':\n"
+        "            cyl_diams.append(round(_s.Radius * 2, 4))\n"
+        "    except Exception:\n"
+        "        pass\n"
         "print(f\"VERDICT solids={len(shape.Solids)} valid={shape.isValid()} \"\n"
         "      f\"volume={shape.Volume:.4f} \"\n"
         "      f\"tess_x={min(xs):.4f}..{max(xs):.4f} \"\n"
         "      f\"tess_y={min(ys):.4f}..{max(ys):.4f} \"\n"
-        "      f\"tess_z={min(zs):.4f}..{max(zs):.4f}\")\n",
+        "      f\"tess_z={min(zs):.4f}..{max(zs):.4f}\")\n"
+        "print('CYLDIAMS ' + json.dumps(sorted(set(cyl_diams))))\n",
         encoding="utf-8",
     )
     log_path = output_dir / "verify.log"
@@ -438,14 +693,26 @@ def verify_step(freecadcmd, step_path, output_dir):
     if match is None or result.returncode != 0:
         return {"ok": False, "raw": text[-1000:]}
     solids, valid, volume = int(match.group(1)), match.group(2), float(match.group(3))
+    tess_x = (float(match.group(4)), float(match.group(5)))
+    tess_y = (float(match.group(6)), float(match.group(7)))
+    tess_z = (float(match.group(8)), float(match.group(9)))
+    cyl_match = re.search(r"CYLDIAMS (\[.*?\])", text)
+    try:
+        cyl_diams = json.loads(cyl_match.group(1)) if cyl_match else []
+    except ValueError:
+        cyl_diams = []
     return {
         "ok": True,
         "solids": solids,
         "valid": valid == "True",
         "volume": volume,
-        "tess_x": (float(match.group(4)), float(match.group(5))),
-        "tess_y": (float(match.group(6)), float(match.group(7))),
-        "tess_z": (float(match.group(8)), float(match.group(9))),
+        "tess_x": tess_x,
+        "tess_y": tess_y,
+        "tess_z": tess_z,
+        "size_x": tess_x[1] - tess_x[0],
+        "size_y": tess_y[1] - tess_y[0],
+        "size_z": tess_z[1] - tess_z[0],
+        "cyl_diams": cyl_diams,
     }
 
 
@@ -626,6 +893,29 @@ def main(argv=None):
             print("\n".join(report_lines))
             return 1
         questions = extract_questions(content, "")
+        # Numbered dimensions: D1... with approximate positions,
+        # saved for the web UI matching tab (numbered drawing +
+        # table). Positions are LLM estimates, not measurements.
+        try:
+            d_dims = parse_numbered_dimensions(content)
+            if d_dims:
+                (output_dir / "dimensions.json").write_text(
+                    json.dumps(d_dims, indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+                report_lines.append(
+                    f"Numbered dimensions: {len(d_dims)} "
+                    f"(see dimensions.json, drawing_numbered.png)")
+                if annotate_drawing(drawing_path, d_dims,
+                                    output_dir / "drawing_numbered.png"):
+                    report_lines.append(
+                        "Numbered drawing: drawing_numbered.png "
+                        "(badge positions are approximate)")
+                else:
+                    report_lines.append(
+                        "Numbered drawing: not created (no positioned "
+                        "dimensions, or PIL unavailable)")
+        except Exception as exc:
+            report_lines.append(f"Numbered dimensions: unavailable ({exc})")
         if questions:
             questions_text = "\n".join(f"{label}: {text}"
                                        for label, text in questions)
@@ -806,7 +1096,12 @@ def main(argv=None):
             append_log(self_fix_log, f"Attempt {attempt}: {last_error}")
             continue
 
-        # PASS: volume is reference only, never a gate.
+        # MODELING COMPLETE (not "success"): the only gate passed
+        # here is solids == 1 and valid True on the STEP file.
+        # Volume is reference only, never a gate. Drawing-vs-modeling
+        # matching is computed separately below and shown as a table;
+        # it is NOT folded into this gate, so a complete-but-wrong
+        # model still reads as "modeling complete", never "success".
         report_lines.append(f"Model: {fcstd_path}")
         report_lines.append(f"STEP: {step_path}")
         report_lines.append(f"Macro: {macro_path}")
@@ -854,18 +1149,36 @@ def main(argv=None):
                 preview_note = f"{render_script.name}: {exc}"
         if not preview_ok:
             report_lines.append(f"Previews: unavailable ({preview_note})")
+        # Drawing-vs-modeling matching table (matching.json + report
+        # lines). Drawing values are the LLM's reading from the
+        # drawing (macro parameters, plus D-dimensions from --text
+        # when present); modeling values are measured from STEP.
+        try:
+            matching_rows = build_matching(verification, macro_text,
+                                           args.text)
+            (output_dir / "matching.json").write_text(
+                json.dumps(matching_rows, indent=2, ensure_ascii=False),
+                encoding="utf-8")
+            for row in matching_rows:
+                report_lines.append(
+                    f"Matching: {row['no']} | {row['item']} | "
+                    f"drawing={row['drawing']} | "
+                    f"modeling={row['modeling']} | {row['result']}")
+        except Exception as exc:
+            report_lines.append(f"Matching: unavailable ({exc})")
         if questions:
             # Still exit 0 (a valid solid was built and its files
             # are kept), but this is NOT a success: provisional
             # values were used while these questions were
-            # unanswered. The RESULT line therefore says QUESTIONS
-            # PENDING, never PASS, and the web UI banner says the
-            # same (it keys off questions.txt, not this line).
+            # unanswered. The RESULT line therefore says MODELING
+            # COMPLETE with QUESTIONS PENDING, never SUCCESS, and
+            # the web UI banner says the same (it keys off
+            # questions.txt, not this line).
             report_lines.append(
-                "RESULT: QUESTIONS PENDING (not a success - "
-                "answer questions.txt and rerun)")
+                "RESULT: MODELING COMPLETE - QUESTIONS PENDING "
+                "(not a success, answer questions.txt and continue)")
         else:
-            report_lines.append("RESULT: PASS")
+            report_lines.append("RESULT: MODELING COMPLETE")
         write_report(output_dir / "report.txt", report_lines)
         print("\n".join(report_lines))
         return 0
