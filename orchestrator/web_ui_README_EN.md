@@ -131,8 +131,9 @@ instructions reuses that folder's drawing/outline/Q&A history
 and starts a fresh run. It does not patch the old model. Note:
 the picker only opens folders that already hold a result. An
 empty new folder or a nonexistent path cannot be opened and
-gives a specific error. To start fresh in a new folder, set a
-new folder in the main form's output folder field.
+gives a specific error. To start fresh, just run from the main
+form — a new timestamped folder is created automatically, no
+need to pick one.
 
 ## Ask first (on by default) — the back-and-forth loop
 "Ask questions first" is on by default. The first run builds no

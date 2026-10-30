@@ -338,16 +338,19 @@ S = {
                              "working from there. The list shows folders "
                              "next to the server; type any other folder "
                              "path (absolute) in the box. The folder must "
-                             "already hold a result. To start fresh in a "
-                             "new folder, use the main form's output "
-                             "folder field.",
+                             "already hold a result. This picker is only "
+                             "for continuing existing work. To start "
+                             "fresh, just run from the main form — a new "
+                             "folder is created automatically, no need "
+                             "to pick one.",
                              "이전 결과 폴더를 골라 열면, 그 폴더의 계속 "
                              "작업 폼으로 거기서부터 이어서 작업할 수 "
                              "있습니다. 목록은 서버 옆 폴더들이고, 다른 "
                              "곳에 있는 폴더는 절대 경로를 직접 입력하세요. "
-                             "폴더에는 이미 결과가 있어야 합니다. 새 "
-                             "폴더에서 새로 시작하려면 메인 폼의 출력 "
-                             "폴더란을 사용하세요."),
+                             "폴더에는 이미 결과가 있어야 합니다. 이 "
+                             "선택기는 기존 작업 이어가기 전용입니다. 새로 "
+                             "시작하려면 폴더를 고를 필요 없이 메인 폼에서 "
+                             "그냥 실행하세요. 새 폴더가 자동으로 생깁니다."),
     "continue_folder_pick": ("Open selected folder", "선택한 폴더 열기"),
     "continue_folder_path": ("Or type a folder path (absolute)",
                              "또는 폴더 경로 직접 입력 (절대 경로)"),
@@ -448,23 +451,24 @@ S = {
                          "폴더가 지정되지 않았습니다. 목록에서 폴더를 "
                          "고르거나 경로 입력란에 폴더 경로를 입력하세요."),
     "err_result_missing": ("That folder does not exist. Check the path. "
-                           "To start fresh in a new folder, use the main "
-                           "form's output folder field instead — this "
-                           "picker only opens folders that already hold "
-                           "a result.",
-                           "해당 폴더가 없습니다. 경로를 확인하세요. 새 "
-                           "폴더에서 새로 시작하려면 이 선택기가 아니라 "
-                           "메인 폼의 출력 폴더란에 새 폴더를 지정하세요. "
-                           "이 선택기는 이미 결과가 있는 폴더만 엽니다."),
+                           "To start fresh, just run from the main form "
+                           "— a new timestamped folder is created "
+                           "automatically. This picker only opens folders "
+                           "that already hold a result.",
+                           "해당 폴더가 없습니다. 경로를 확인하세요. 새로 "
+                           "시작하려면 메인 폼에서 그냥 실행하세요. 새 "
+                           "타임스탬프 폴더가 자동으로 생깁니다. 이 선택기는 "
+                           "이미 결과가 있는 폴더만 엽니다."),
     "err_result_nofiles": ("That folder holds no result files "
                            "(report.txt, guidance.txt, or model.step). "
-                           "Pick an existing result folder, or start "
-                           "fresh from the main form's output folder "
-                           "field.",
+                           "Pick an existing result folder to continue "
+                           "it, or just run from the main form to start "
+                           "fresh — a new folder is created automatically.",
                            "해당 폴더에 결과 파일(report.txt, "
                            "guidance.txt, model.step 중 하나)이 없어서 열 "
-                           "수 없습니다. 기존 결과 폴더를 고르거나, 메인 "
-                           "폼의 출력 폴더란에서 새로 시작하세요."),
+                           "수 없습니다. 이어서 작업할 기존 결과 폴더를 "
+                           "고르거나, 새로 시작하려면 메인 폼에서 그냥 "
+                           "실행하세요. 새 폴더가 자동으로 생깁니다."),
     "err_view_file": ("This file cannot be viewed in the browser.",
                       "브라우저에서 볼 수 없는 파일입니다."),
     "err_download_path": ("Cannot download this path.",
