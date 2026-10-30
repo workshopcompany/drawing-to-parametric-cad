@@ -40,6 +40,12 @@ run_pipeline.py에는 환경변수(META_API_KEY)로만 전달됩니다. 키 칸�
 .env 파일 자체도 다운로드로 제공할 수 없습니다 (출력 폴더 밖 파일은
 다운로드가 막혀 있습니다).
 
+## 윤곽 도구
+outline_snap_tool.html을 브라우저로 열면, 도면 위에 윤곽을 직접 그려서
+JSON으로 뽑을 수 있습니다. 이 파일은 test/test2_snap_tool.html의
+복사본입니다. test/ 원본은 test2 당시 기록본이라 그대로 두고,
+앞으로 윤곽 도구를 고칠 때는 orchestrator/ 복사본만 고칩니다.
+
 ## 솔직한 한계
 이 UI는 사용자의 PC에서만 돌아갑니다. Muse가 이 PC를 조종하게 하지
 않으며, FreeCAD를 대신하지도 않습니다. FreeCAD 1.1.4가 별도로
