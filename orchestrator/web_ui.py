@@ -626,6 +626,41 @@ def result_page(output_dir, returncode, stdout_tail=""):
         banner = ("<span class=\"status-warn\">⚠️ 성공 (임시 — 질문 대기 중, "
                   "questions.txt 확인)</span>")
 
+    # Answer form (only when questions exist): POST /answer reuses the
+    # previous run's drawing/outline and starts a NEW run with the
+    # answers as --text. It is not a resume of the old macro.
+    answer_form = ""
+    if questions_text.strip():
+        import re as _re
+        labels = _re.findall(r"(Q\d+)\s*:", questions_text)
+        seen = []
+        for label in labels:
+            if label not in seen:
+                seen.append(label)
+        prefill = "\n".join(f"{label}: " for label in seen)
+        gear_checked = ("checked" if "Gear reference: included"
+                        in report_text else "")
+        dir_query = html.escape(str(output_dir), quote=True)
+        answer_form = f"""
+      <div class="card"><h3>✏️ 질문에 답변하고 다시 실행</h3>
+      <p class="note">아래에 답을 적으면, 도면/윤곽은 이 결과에서 자동으로 가져오고
+      답변을 넣은 새 실행이 시작됩니다. 이전 매크로를 이어서 고치는 게 아니라,
+      처음부터 새로 만드는 실행입니다. 출력은 시간 붙은 새 폴더에 생깁니다.
+      이전 부품 설명은 자동으로 안 넘어가니, 필요하면 답변에 같이 적으세요.</p>
+      <form action="/answer" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="dir" value="{dir_query}">
+      <label for="answers">답변 (질문별로 적으세요)</label>
+      <textarea id="answers" name="answers" rows="10">{html.escape(prefill)}</textarea>
+      <label for="freecadcmd_answer">freecadcmd</label>
+      <input type="text" id="freecadcmd_answer" name="freecadcmd" value="freecadcmd">
+      <label><input type="checkbox" name="gear" value="on" {gear_checked} style="width:auto;"> 기어 부품</label>
+      <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
+      <label for="api_key_answer">Meta API 키</label>
+      <input type="password" id="api_key_answer" name="api_key" autocomplete="off">
+      <p class="note">키는 저장되지 않고 이번 실행에만 사용. 비우면 레포 폴더 .env 키 사용.</p>
+      <button type="submit">답변하고 다시 실행</button>
+      </form></div>"""
+
     def view_link(name):
         query = urllib.parse.urlencode({"dir": str(output_dir), "file": name})
         return f"/view?{query}"
@@ -722,6 +757,7 @@ def result_page(output_dir, returncode, stdout_tail=""):
     </div>
     <div class="tab-panel" id="r4">
       <div class="card"><h3>❓ questions.txt (미답변 질문)</h3><pre>{html.escape(questions_text) if questions_text else "(없음 — 이번 매크로에 질문이 없습니다)"}</pre><p class="note">매크로 주석/출력에서 뽑은 질문입니다. 임시값으로 만든 결과라면, 답을 주고 다시 실행하세요.</p></div>
+      {answer_form}
       <div class="grid2">
         <div class="card"><h3>report.txt</h3><pre>{html.escape(report_text) if report_text else "(없음)"}</pre></div>
         <div class="card"><h3>guidance.txt</h3><pre>{html.escape(guidance_text) if guidance_text else "(없음 — 성공 시 생기지 않습니다)"}</pre></div>
@@ -897,7 +933,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/run":
+        if parsed.path not in ("/run", "/answer"):
             self.send_error(404, "Not found")
             return
         try:
@@ -917,6 +953,47 @@ class Handler(BaseHTTPRequestHandler):
             data = error_page("업로드 파싱에 실패했습니다. 다시 제출하세요.")
             self._send_html(400, data)
             return
+
+        if parsed.path == "/answer":
+            # Translate the answer form into a /run-equivalent
+            # submission, then fall through to the shared /run logic
+            # below. Drawing/outline come from the previous output
+            # folder (no re-upload); answers become --text.
+            prev_dir = None
+            raw_dir = fields.get("dir", "")
+            if raw_dir:
+                try:
+                    prev_dir = Path(raw_dir).resolve()
+                except OSError:
+                    prev_dir = None
+            if prev_dir is None or not prev_dir.is_dir():
+                data = error_page("이전 결과 폴더를 찾을 수 없습니다.")
+                self._send_html(400, data)
+                return
+            answers = fields.get("answers", "").strip()
+            if not answers:
+                data = error_page("답변을 입력하세요.")
+                self._send_html(400, data)
+                return
+            drawings = sorted(prev_dir.glob("input_drawing.*"))
+            if not drawings:
+                data = error_page("이전 결과에 도면(input_drawing.*)이 없습니다.")
+                self._send_html(400, data)
+                return
+            drawing_path = drawings[0]
+            files["drawing"] = (drawing_path.name, drawing_path.read_bytes())
+            outlines = sorted(prev_dir.glob("input_outline.*"))
+            if outlines:
+                outline_path = outlines[0]
+                files["outline"] = (outline_path.name,
+                                    outline_path.read_bytes())
+            # resolve_run_output_dir() timestamps this, since the
+            # previous folder already holds a report/model.
+            fields["output_dir"] = str(prev_dir)
+            fields["notes"] = (
+                "Answers to the previous run's questions:\n"
+                + answers
+                + f"\n(Previous run folder: {prev_dir.name})")
 
         dry_run = fields.get("dry_run") == "on"
         api_key = fields.get("api_key", "")

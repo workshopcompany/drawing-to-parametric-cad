@@ -57,6 +57,19 @@ provisional values while questions were unanswered is shown as
 "success (provisional — questions pending)", not a clean success.
 Answer the questions and rerun.
 
+## Answer questions and rerun (answer form on the QA tab)
+A result with questions shows an answer form below the questions on
+the QA tab. Fill in an answer per question and submit: the drawing
+and outline are taken automatically from that result, and a new run
+starts with the answers as `--text`. This is a fresh run from
+scratch, not a resume of the old macro, and its output goes to a new
+timestamped folder. The gear checkbox defaults to the previous
+result's setting (from `report.txt`) and can be changed. freecadcmd
+and the API key must be entered again (previous values are not
+stored). Previous part notes are not carried over automatically, so
+include anything still needed in the answers. An empty answer does
+not run.
+
 ## Output folders (timestamped, never overwritten)
 Running with the default (`./my_run_output`) creates a timestamped
 folder instead (e.g. `my_run_output_20261030_090411`). Specifying a
