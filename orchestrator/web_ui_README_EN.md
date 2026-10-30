@@ -122,14 +122,18 @@ not — recent runs scan the server's working folder).
 
 ## Pick a work folder and continue from it
 Below recent runs on the main page there is a "Continue from a
-work folder" box. Pick a folder from the list, or type any other
-folder's absolute path, to open it. Every result page now always
-shows a Continue form: folders with questions/guidance get the
-answer form, and completed folders without questions get a
-"Continue this project" form (new instructions). Writing new
-instructions reuses that folder's drawing/outline/Q&A history
-and starts a fresh run. It does not patch the old model. Note:
-the picker only opens folders that already hold a result. An
+work folder" box. Pick a folder from the list and press "Rerun
+selected folder": that folder's saved drawing/outline/Q&A
+history is reused, so no drawing upload is needed, and a fresh
+run starts in a new timestamped folder. It does not patch the
+old model. To only open a folder and look at it, use the
+absolute-path box or a link in the recent list: every result
+page now always shows a Continue form: folders with
+questions/guidance get the answer form, and completed folders
+without questions get a "Continue this project" form (new
+instructions). Writing new instructions reuses that folder's
+drawing/outline/Q&A history and starts a fresh run. Note:
+the picker only handles folders that already hold a result. An
 empty new folder or a nonexistent path cannot be opened and
 gives a specific error. To start fresh, just run from the main
 form — a new timestamped folder is created automatically, no

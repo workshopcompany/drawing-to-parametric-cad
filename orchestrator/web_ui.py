@@ -333,25 +333,30 @@ S = {
                        "결과라면, 답을 주고 다시 실행하세요."),
     "continue_folder_title": ("Continue from a work folder",
                                "작업 폴더에서 이어서 작업"),
-    "continue_folder_note": ("Pick a previous result folder to open it, "
-                             "then use its Continue work form to keep "
-                             "working from there. The list shows folders "
-                             "next to the server; type any other folder "
-                             "path (absolute) in the box. The folder must "
+    "continue_folder_note": ("Pick a previous result folder and rerun it. "
+                             "The saved drawing (and outline, Q&A history, "
+                             "numbered dimensions) from that folder is "
+                             "reused, so you do not need to upload a "
+                             "drawing again. The list shows folders next "
+                             "to the server; to only open a folder and "
+                             "look at it, use the path box below or a "
+                             "link in the recent list. The folder must "
                              "already hold a result. This picker is only "
                              "for continuing existing work. To start "
                              "fresh, just run from the main form — a new "
                              "folder is created automatically, no need "
                              "to pick one.",
-                             "이전 결과 폴더를 골라 열면, 그 폴더의 계속 "
-                             "작업 폼으로 거기서부터 이어서 작업할 수 "
-                             "있습니다. 목록은 서버 옆 폴더들이고, 다른 "
-                             "곳에 있는 폴더는 절대 경로를 직접 입력하세요. "
-                             "폴더에는 이미 결과가 있어야 합니다. 이 "
-                             "선택기는 기존 작업 이어가기 전용입니다. 새로 "
-                             "시작하려면 폴더를 고를 필요 없이 메인 폼에서 "
-                             "그냥 실행하세요. 새 폴더가 자동으로 생깁니다."),
-    "continue_folder_pick": ("Open selected folder", "선택한 폴더 열기"),
+                             "이전 결과 폴더를 골라 다시 실행하세요. 그 "
+                             "폴더에 저장된 도면(과 윤곽, Q&A 내역, 번호 "
+                             "도면)이 그대로 쓰이므로 도면을 다시 올릴 "
+                             "필요가 없습니다. 목록은 서버 옆 폴더들이고, "
+                             "폴더를 열어서 보기만 하려면 아래 경로 입력란이나 "
+                             "최근 목록의 링크를 쓰세요. 폴더에는 이미 "
+                             "결과가 있어야 합니다. 이 선택기는 기존 작업 "
+                             "이어가기 전용입니다. 새로 시작하려면 폴더를 "
+                             "고를 필요 없이 메인 폼에서 그냥 실행하세요. "
+                             "새 폴더가 자동으로 생깁니다."),
+    "continue_folder_pick": ("Rerun selected folder", "선택한 폴더 다시 실행"),
     "continue_folder_path": ("Or type a folder path (absolute)",
                              "또는 폴더 경로 직접 입력 (절대 경로)"),
     "continue_folder_open": ("Open folder", "폴더 열기"),
@@ -1074,11 +1079,26 @@ def recent_html(lang="en"):
             f"{html.escape(item['name'])} [{item['status']}]</option>")
     picker = ""
     if pick_options:
+        # Rerun form: POST /answer with rerun=1 reuses the picked
+        # folder's saved drawing/outline/Q&A history — no drawing
+        # upload needed. The path box below still only opens a
+        # folder (GET /result) for viewing.
         picker = (
-            f"<form action=\"/result\" method=\"get\">"
+            f"<form action=\"/answer\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
             f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<input type=\"hidden\" name=\"rerun\" value=\"1\">"
             f"<label>{tr(lang, 'continue_folder_title')}</label>"
             f"<select name=\"dir\">{pick_options}</select>"
+            f"<label for=\"freecadcmd_rerun\">freecadcmd</label>"
+            f"<input type=\"text\" id=\"freecadcmd_rerun\" name=\"freecadcmd\" "
+            f"value=\"freecadcmd\">"
+            f"<label><input type=\"checkbox\" name=\"dry_run\" value=\"on\" "
+            f"style=\"width:auto;\"> {tr(lang, 'dry_label')}</label>"
+            f"<label for=\"api_key_rerun\">Meta API key</label>"
+            f"<input type=\"password\" id=\"api_key_rerun\" name=\"api_key\" "
+            f"autocomplete=\"off\">"
+            f"<p class=\"note\">{tr(lang, 'key_note')}</p>"
             f"<button type=\"submit\">{tr(lang, 'continue_folder_pick')}</button>"
             f"</form>")
     picker += (
@@ -1590,7 +1610,10 @@ class Handler(BaseHTTPRequestHandler):
             # Translate the answer form into a /run-equivalent
             # submission, then fall through to the shared /run logic
             # below. Drawing/outline come from the previous output
-            # folder (no re-upload); answers become --text.
+            # folder (no re-upload); answers become --text. With
+            # rerun=1 (picker "Rerun selected folder") no answers are
+            # posted: empty answers are allowed and the previous
+            # run's gear setting is kept.
             prev_dir = None
             raw_dir = fields.get("dir", "")
             if raw_dir:
@@ -1610,6 +1633,14 @@ class Handler(BaseHTTPRequestHandler):
             if prev_report_path.is_file():
                 prev_report = prev_report_path.read_text(
                     encoding="utf-8", errors="replace")
+            # Rerun (picker "Rerun selected folder"): no answers box
+            # is posted, and the picker form has no gear checkbox, so
+            # repeat the previous run's gear setting from its report
+            # (same marker the result page uses for its checkbox).
+            rerun = fields.get("rerun") == "1"
+            if rerun and "gear" not in fields:
+                if "Gear reference: included" in prev_report:
+                    fields["gear"] = "on"
             prev_questions = ""
             prev_questions_path = prev_dir / "questions.txt"
             if prev_questions_path.is_file():
@@ -1635,7 +1666,7 @@ class Handler(BaseHTTPRequestHandler):
             askfirst_no_questions = (
                 "ASK-FIRST" in prev_report and not prev_questions
                 and not (prev_dir / "model.fcstd").is_file())
-            if not answers and not askfirst_no_questions:
+            if not answers and not askfirst_no_questions and not rerun:
                 data = error_page(tr(lang, "err_answers_empty"), lang=lang)
                 self._send_html(400, data)
                 return
@@ -1671,7 +1702,10 @@ class Handler(BaseHTTPRequestHandler):
             if prev_guidance_path.is_file():
                 prev_guidance = prev_guidance_path.read_text(
                     encoding="utf-8", errors="replace").strip()
-            if prev_questions:
+            if rerun:
+                _entry = ("Rerun:\n" + answers) if answers else \
+                    "Rerun with no new instructions."
+            elif prev_questions:
                 _entry = ("Questions:\n" + prev_questions
                           + "\nAnswers:\n" + answers)
             elif prev_guidance:
