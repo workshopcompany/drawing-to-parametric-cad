@@ -120,6 +120,16 @@ the folder, and restarting the server in the same folder shows
 them in recent runs again (starting in a different folder does
 not — recent runs scan the server's working folder).
 
+## Pick a work folder and continue from it
+Below recent runs on the main page there is a "Continue from a
+work folder" box. Pick a folder from the list, or type any other
+folder's absolute path, to open it. Every result page now always
+shows a Continue form: folders with questions/guidance get the
+answer form, and completed folders without questions get a
+"Continue this project" form (new instructions). Writing new
+instructions reuses that folder's drawing/outline/Q&A history
+and starts a fresh run. It does not patch the old model.
+
 ## Ask first (on by default) — the back-and-forth loop
 "Ask questions first" is on by default. The first run builds no
 model and only extracts questions (report says "ASK-FIRST", no

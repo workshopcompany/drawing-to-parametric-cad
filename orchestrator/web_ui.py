@@ -331,6 +331,32 @@ S = {
                        "so answer and continue below.",
                        "매크로 주석/출력에서 뽑은 질문입니다. 임시값으로 만든 "
                        "결과라면, 답을 주고 다시 실행하세요."),
+    "continue_folder_title": ("Continue from a work folder",
+                               "작업 폴더에서 이어서 작업"),
+    "continue_folder_note": ("Pick a previous result folder to open it, "
+                             "then use its Continue work form to keep "
+                             "working from there. The list shows folders "
+                             "next to the server; type any other folder "
+                             "path (absolute) in the box.",
+                             "이전 결과 폴더를 골라 열면, 그 폴더의 계속 "
+                             "작업 폼으로 거기서부터 이어서 작업할 수 "
+                             "있습니다. 목록은 서버 옆 폴더들이고, 다른 "
+                             "곳에 있는 폴더는 절대 경로를 직접 입력하세요."),
+    "continue_folder_pick": ("Open selected folder", "선택한 폴더 열기"),
+    "continue_folder_path": ("Or type a folder path (absolute)",
+                             "또는 폴더 경로 직접 입력 (절대 경로)"),
+    "continue_folder_open": ("Open folder", "폴더 열기"),
+    "continue_title": ("▶ Continue this project",
+                        "▶ 이 프로젝트 이어서 작업"),
+    "continue_note": ("Write new instructions below and press Continue "
+                      "work: the drawing/outline and Q&A history from "
+                      "this result are reused, and a fresh run starts. "
+                      "This does not patch the old model.",
+                      "아래에 새 지시를 적고 계속 작업을 누르면, 이 "
+                      "결과의 도면/윤곽/Q&A 내역이 재사용되고 새 실행이 "
+                      "시작됩니다. 이전 모델을 고치는 게 아니라 새로 "
+                      "만드는 실행입니다."),
+    "continue_label": ("New instructions", "새 지시"),
     "answer_title": ("✏️ Answer questions and continue work",
                     "✏️ 질문에 답하고 계속 작업"),
     "answer_note": ("Write your answers below and press Continue work: "
@@ -999,9 +1025,34 @@ def recent_html(lang="en"):
                             f"{tr(lang, 'outline_note2')}</p>")
     except OSError:
         pass
+    pick_options = ""
+    for item in list_result_dirs(limit=50):
+        pick_options += (
+            f"<option value=\"{html.escape(item['dir'], quote=True)}\">"
+            f"{html.escape(item['name'])} [{item['status']}]</option>")
+    picker = ""
+    if pick_options:
+        picker = (
+            f"<form action=\"/result\" method=\"get\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<label>{tr(lang, 'continue_folder_title')}</label>"
+            f"<select name=\"dir\">{pick_options}</select>"
+            f"<button type=\"submit\">{tr(lang, 'continue_folder_pick')}</button>"
+            f"</form>")
+    picker += (
+        f"<form action=\"/result\" method=\"get\">"
+        f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+        f"<label>{tr(lang, 'continue_folder_path')}</label>"
+        f"<input type=\"text\" name=\"dir\" "
+        f"placeholder=\"E:\\drawing_to_parametric_cad_orchestrator\\my_run_output_20261030_...\">"
+        f"<button type=\"submit\">{tr(lang, 'continue_folder_open')}</button>"
+        f"</form>")
     return (f"<div class=\"card\"><h3>&#128193; {tr(lang, 'recent_title')}</h3>"
             f"<p class=\"note\">{tr(lang, 'recent_note')}</p>"
             f"{table}{outline_link}"
+            f"<div class=\"card\"><h3>&#128193; {tr(lang, 'continue_folder_title')}</h3>"
+            f"<p class=\"note\">{tr(lang, 'continue_folder_note')}</p>"
+            f"{picker}</div>"
             "<div id=\"recentBox\" class=\"note\" style=\"display:none;\"></div></div>")
 
 
@@ -1074,34 +1125,42 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
         # Old results (pre-QUESTIONS-PENDING) with a provisional PASS.
         banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
 
-    # Answer form (when questions exist, or when guidance exists):
-    # POST /answer reuses the previous run's drawing/outline and starts
-    # a NEW run with the answers as --text. It is not a resume of the
-    # old macro. Guidance alone (design-question FAIL, or 3rd failure)
-    # must also offer Continue work, or the result is a dead end.
-    answer_form = ""
+    # Continue form (ALWAYS shown): POST /answer reuses the previous
+    # run's drawing/outline and starts a NEW run with the answers as
+    # --text. It is not a resume of the old macro. Showing it only when
+    # questions/guidance exist left completed folders with no way to
+    # continue from them (Oct 30: user asked for folder-pick continue).
+    # With questions/guidance it is the answer form; otherwise it is a
+    # plain "continue this project with new instructions" form.
+    import re as _re
+    labels = _re.findall(r"(Q\d+)\s*:", questions_text)
+    seen = []
+    for label in labels:
+        if label not in seen:
+            seen.append(label)
+    prefill = "\n".join(f"{label}: " for label in seen)
+    gear_checked = ("checked" if "Gear reference: included"
+                    in report_text else "")
+    dir_query = html.escape(str(output_dir), quote=True)
+    askfirst_note = ""
+    if not (output_dir / "model.fcstd").is_file():
+        askfirst_note = (f"<p class=\"note\">{tr(lang, 'answer_askfirst_note')}</p>")
     if questions_text.strip() or guidance_text.strip():
-        import re as _re
-        labels = _re.findall(r"(Q\d+)\s*:", questions_text)
-        seen = []
-        for label in labels:
-            if label not in seen:
-                seen.append(label)
-        prefill = "\n".join(f"{label}: " for label in seen)
-        gear_checked = ("checked" if "Gear reference: included"
-                        in report_text else "")
-        dir_query = html.escape(str(output_dir), quote=True)
-        askfirst_note = ""
-        if not (output_dir / "model.fcstd").is_file():
-            askfirst_note = (f"<p class=\"note\">{tr(lang, 'answer_askfirst_note')}</p>")
-        answer_form = f"""
-      <div class="card"><h3>{tr(lang, 'answer_title')}</h3>
-      <p class="note">{tr(lang, 'answer_note')}</p>
+        _form_title = tr(lang, 'answer_title')
+        _form_note = tr(lang, 'answer_note')
+        _form_label = tr(lang, 'answer_label')
+    else:
+        _form_title = tr(lang, 'continue_title')
+        _form_note = tr(lang, 'continue_note')
+        _form_label = tr(lang, 'continue_label')
+    answer_form = f"""
+      <div class="card"><h3>{_form_title}</h3>
+      <p class="note">{_form_note}</p>
       {askfirst_note}
       <form action="/answer" method="post" enctype="multipart/form-data">
       <input type="hidden" name="dir" value="{dir_query}">
       <input type="hidden" name="lang" value="{lang}">
-      <label for="answers">{tr(lang, 'answer_label')}</label>
+      <label for="answers">{_form_label}</label>
       <textarea id="answers" name="answers" rows="10">{html.escape(prefill)}</textarea>
       <label for="freecadcmd_answer">freecadcmd</label>
       <input type="text" id="freecadcmd_answer" name="freecadcmd" value="freecadcmd">
@@ -1557,11 +1616,18 @@ class Handler(BaseHTTPRequestHandler):
             if prev_history_path.is_file():
                 prev_history = prev_history_path.read_text(
                     encoding="utf-8", errors="replace").strip()
+            prev_guidance = ""
+            prev_guidance_path = prev_dir / "guidance.txt"
+            if prev_guidance_path.is_file():
+                prev_guidance = prev_guidance_path.read_text(
+                    encoding="utf-8", errors="replace").strip()
             if prev_questions:
                 _entry = ("Questions:\n" + prev_questions
                           + "\nAnswers:\n" + answers)
+            elif prev_guidance:
+                _entry = ("Answers to the guidance question:\n" + answers)
             elif answers:
-                _entry = "Answers:\n" + answers
+                _entry = "Continued work instructions:\n" + answers
             else:
                 _entry = "Ask-first step asked no questions. Build now."
             qa_trail = ((prev_history + "\n" if prev_history else "")
