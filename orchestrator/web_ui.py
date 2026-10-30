@@ -626,6 +626,7 @@ def form_page_ko():
   </div>
 </div>
 </form>
+{picker_html("ko")}
 <script>
 (function(){{
   function showFile(inputId, imgIds){{
@@ -763,6 +764,7 @@ def form_page_en():
   </div>
 </div>
 </form>
+{picker_html("en")}
 <script>
 (function(){{
   function showFile(inputId, imgIds){{
@@ -1072,6 +1074,20 @@ def recent_html(lang="en"):
                             f"{tr(lang, 'outline_note2')}</p>")
     except OSError:
         pass
+    return (f"<div class=\"card\"><h3>&#128193; {tr(lang, 'recent_title')}</h3>"
+            f"<p class=\"note\">{tr(lang, 'recent_note')}</p>"
+            f"{table}{outline_link}"
+            "<div id=\"recentBox\" class=\"note\" style=\"display:none;\"></div></div>")
+
+
+def picker_html(lang="en"):
+    """Continue-from-a-folder picker card (rerun form + path box).
+
+    MUST be rendered outside the main /run <form>: nested <form>
+    tags are invalid HTML, browsers drop the inner tags, and the
+    Rerun button then submits the outer /run form — whose required
+    drawing field blocks it and grabs focus (reported Oct 30, 2026).
+    form_page_en/ko render this after </form>."""
     pick_options = ""
     for item in list_result_dirs(limit=50):
         pick_options += (
@@ -1109,13 +1125,9 @@ def recent_html(lang="en"):
         f"placeholder=\"E:\\drawing_to_parametric_cad_orchestrator\\my_run_output_20261030_...\">"
         f"<button type=\"submit\">{tr(lang, 'continue_folder_open')}</button>"
         f"</form>")
-    return (f"<div class=\"card\"><h3>&#128193; {tr(lang, 'recent_title')}</h3>"
-            f"<p class=\"note\">{tr(lang, 'recent_note')}</p>"
-            f"{table}{outline_link}"
-            f"<div class=\"card\"><h3>&#128193; {tr(lang, 'continue_folder_title')}</h3>"
+    return (f"<div class=\"card\"><h3>&#128193; {tr(lang, 'continue_folder_title')}</h3>"
             f"<p class=\"note\">{tr(lang, 'continue_folder_note')}</p>"
-            f"{picker}</div>"
-            "<div id=\"recentBox\" class=\"note\" style=\"display:none;\"></div></div>")
+            f"{picker}</div>")
 
 
 def form_gallery_html(lang="en"):
