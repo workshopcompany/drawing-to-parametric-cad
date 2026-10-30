@@ -91,6 +91,19 @@ numbered drawing only comes from ask-first runs, and it is copied
 into the new folder on Continue work. Older result folders have
 none.
 
+## Continuing after a failure (design-question FAIL is not a dead end)
+If the LLM answers with questions instead of a macro, the
+pipeline stops with FAIL (design question) rather than inventing
+values. No model in that case is normal (stopping beats building
+a wrong part). The LLM's question goes verbatim into
+guidance.txt and also into questions.txt. Read the guidance on
+the result page QA tab and answer in the "Continue work" form
+below it. Older failed folders with guidance but no questions
+also get the form now. Continue work is a fresh run, not a
+resume, so paste the previous answers again too. Chained
+Continue-work runs no longer compound timestamps in folder names
+(the old stamp is stripped before a new one is appended).
+
 ## Ask first (on by default) — the back-and-forth loop
 "Ask questions first" is on by default. The first run builds no
 model and only extracts questions (report says "ASK-FIRST", no

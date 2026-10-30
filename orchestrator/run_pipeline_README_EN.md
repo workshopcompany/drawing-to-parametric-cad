@@ -91,6 +91,15 @@ if positions exist, red numbered badges are drawn into
 drawing_numbered.png (skipped if PIL is missing or no positions;
 positions are estimates).
 
+## Design-question FAIL (questions instead of a macro)
+If the LLM answers with questions instead of a macro, the
+pipeline does not self-fix and does not invent around it: it
+writes the question verbatim to guidance.txt and exits with
+"RESULT: FAIL - design question" (exit code 1, no model). The
+question also goes to questions.txt, so the web UI offers
+Continue work right away. A design question is never bypassed
+by invention.
+
 ## Ask first (--ask-first)
 With `--ask-first`, the first run builds no model and only extracts
 questions. The LLM is told "no macro, no code, questions only in

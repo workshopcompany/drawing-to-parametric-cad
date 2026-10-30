@@ -828,8 +828,13 @@ def resolve_run_output_dir(raw):
         and ((path / "report.txt").is_file()
              or (path / "model.fcstd").is_file()))
     if needs_stamp:
+        # Strip a previous _YYYYMMDD_HHMMSS suffix first: chained
+        # /answer runs otherwise compound timestamps in the folder
+        # name (my_run_output_..._..._...), risking Windows MAX_PATH.
+        import re as _re
+        base = _re.sub(r"_\d{8}_\d{6}$", "", path.name)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = Path(f"{path}_{stamp}")
+        path = path.with_name(f"{base}_{stamp}")
     return path
 
 
@@ -1060,11 +1065,13 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
         # Old results (pre-QUESTIONS-PENDING) with a provisional PASS.
         banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
 
-    # Answer form (only when questions exist): POST /answer reuses the
-    # previous run's drawing/outline and starts a NEW run with the
-    # answers as --text. It is not a resume of the old macro.
+    # Answer form (when questions exist, or when guidance exists):
+    # POST /answer reuses the previous run's drawing/outline and starts
+    # a NEW run with the answers as --text. It is not a resume of the
+    # old macro. Guidance alone (design-question FAIL, or 3rd failure)
+    # must also offer Continue work, or the result is a dead end.
     answer_form = ""
-    if questions_text.strip():
+    if questions_text.strip() or guidance_text.strip():
         import re as _re
         labels = _re.findall(r"(Q\d+)\s*:", questions_text)
         seen = []

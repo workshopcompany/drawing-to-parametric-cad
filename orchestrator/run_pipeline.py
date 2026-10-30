@@ -1016,6 +1016,18 @@ def main(argv=None):
                 f"{content}\n"
             )
             (output_dir / "guidance.txt").write_text(guidance, encoding="utf-8")
+            # Also write questions.txt: otherwise the web UI shows
+            # "(None - this macro asked no questions)" and NO Continue
+            # form, a dead end (Oct 30 home run: full Q1-Q12 answers
+            # in, FAIL design question out, no way to continue).
+            _qs = extract_questions(content, "")
+            if _qs:
+                _qt = "\n".join(f"{label}: {text}"
+                                 for label, text in _qs)
+            else:
+                _qt = content.strip()
+            (output_dir / "questions.txt").write_text(
+                _qt + "\n", encoding="utf-8")
             report_lines.append("RESULT: FAIL - design question, see guidance.txt")
             write_report(output_dir / "report.txt", report_lines)
             print(guidance)
