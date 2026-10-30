@@ -15,7 +15,10 @@ What it does:
   1. Shows one Korean form: drawing upload, part notes, gear checkbox,
      output folder, dry-run checkbox, freecadcmd, Meta API key
      (password field).
-  2. On submit, saves the uploaded drawing under the output folder
+  2. On submit, first runs pre-flight checks (key present unless
+     dry-run, freecadcmd findable unless dry-run). A failed check
+     stops before any API call and before any output is made.
+     Then it saves the uploaded drawing under the output folder
      (input_drawing.<ext>) and runs run_pipeline.py synchronously as
      a subprocess, capturing stdout/stderr to <output>/web_ui_run.log.
      A real run takes minutes; the browser waits until it finishes.
@@ -45,6 +48,7 @@ import argparse
 import html
 import mimetypes
 import os
+import shutil
 import subprocess
 import sys
 import urllib.parse
@@ -95,6 +99,15 @@ def dotenv_key_present():
     return False
 
 
+def freecadcmd_found(value):
+    """True if freecadcmd is an existing file path or found in PATH."""
+    if not value:
+        return False
+    if Path(value).expanduser().is_file():
+        return True
+    return shutil.which(value) is not None
+
+
 def page(title, body):
     return (
         "<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\">"
@@ -117,6 +130,7 @@ def form_page():
 <p class="note">서버를 시작한 폴더 기준 상대 경로입니다. 결과(.fcstd, .step, 보고서)가 이 폴더에 생깁니다.</p>
 <label for="freecadcmd">freecadcmd</label>
 <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
+<p class="note">FreeCAD 1.1.4가 PATH에 없으면, 전체 경로를 입력하세요. Windows 예: C:\\Program Files\\FreeCAD 1.1.4\\bin\\freecadcmd.exe (설치 폴더에 따라 다릅니다). 이 경로가 틀리면 API 호출 전에 여기서 멈춥니다.</p>
 <label><input type="checkbox" name="dry_run" value="on"> dry-run (API 호출 없이 프롬프트 조립만 확인)</label>
 <p class="note">처음엔 dry-run으로 프롬프트 조립부터 확인하세요.</p>
 <label for="api_key">Meta API 키</label>
@@ -316,6 +330,19 @@ class Handler(BaseHTTPRequestHandler):
         if not dry_run and not api_key and not dotenv_key_present():
             data = error_page("API 키를 입력하거나, dry-run을 선택하거나, "
                               "레포 폴더에 .env 파일을 만드세요.")
+            self._send_html(400, data)
+            return
+        # Pre-flight: freecadcmd must be findable before any API call.
+        # run_pipeline.py checks this too, but the UI stops earlier
+        # with a Korean explanation, so no API credit is spent.
+        freecadcmd_value = fields.get("freecadcmd", "freecadcmd") or "freecadcmd"
+        if not dry_run and not freecadcmd_found(freecadcmd_value):
+            data = error_page(
+                "freecadcmd를 찾을 수 없습니다. FreeCAD 1.1.4가 설치돼 있는지 "
+                "확인하고, freecadcmd 칸에 전체 경로를 입력하세요. "
+                "Windows 예: C:\\Program Files\\FreeCAD 1.1.4\\bin\\freecadcmd.exe "
+                "(설치 폴더에 따라 다릅니다). 이 단계에서 API는 호출되지 "
+                "않았습니다.")
             self._send_html(400, data)
             return
         if "drawing" not in files or not files["drawing"][1]:

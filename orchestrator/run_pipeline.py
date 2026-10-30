@@ -411,9 +411,13 @@ def main(argv=None):
             "This script never asks for the key in chat and never "
             "prints it.")
 
-    if shutil.which(args.freecadcmd) is None:
+    if shutil.which(args.freecadcmd) is None and not Path(args.freecadcmd).is_file():
         die(f"freecadcmd not found: {args.freecadcmd} "
-            "(install FreeCAD 1.1.4 or pass --freecadcmd).")
+            "(install FreeCAD 1.1.4 or pass --freecadcmd). "
+            "On Windows, pass the full path to bin\\freecadcmd.exe "
+            "in your FreeCAD install folder, or add that bin folder "
+            "to PATH. This check runs BEFORE any API call, so no "
+            "API credit is spent on this failure.")
 
     fcstd_path = output_dir / "model.fcstd"
     step_path = output_dir / "model.step"
