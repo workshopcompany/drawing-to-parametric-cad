@@ -291,14 +291,52 @@ def looks_like_question(content):
 
 
 def safety_check(macro_text):
-    """Return a list of (line_number, pattern, line_text) hits."""
+    """Return a list of (line_number, pattern, line_text) hits.
+
+    Comment text is NOT checked: a comment mentioning a blocked word
+    (e.g. "# no AttachmentOffset use") does not execute, so it must
+    not block a macro. Lesson from the Oct 30 home run: attempt 1 was
+    blocked solely by such a comment, and the self-fix then dropped
+    the pending-gear block with it. Only the code before the first
+    '#' on each line is checked.
+    """
     hits = []
     for lineno, line in enumerate(macro_text.splitlines(), start=1):
+        code = line.split("#", 1)[0]
         for pattern, label in SAFETY_PATTERNS:
-            if re.search(pattern, line):
+            if re.search(pattern, code):
                 hits.append((lineno, label, line.strip()[:160]))
                 break
     return hits
+
+
+def extract_questions(content, macro_text):
+    """Extract unanswered design questions (Q1, Q2, ...) from a response.
+
+    Looks for lines that START a question: a macro comment ("# Q1 ..."),
+    a print ("print(\\"Q1 ...\\")"), or a plain "Q1: ..." line. Inline
+    references such as "pending Q3/Q6" are NOT questions and are
+    ignored. Returns [(number, text), ...] sorted by number, deduped.
+    """
+    questions = {}
+    for text in (content, macro_text):
+        for line in text.splitlines():
+            stripped = line.strip()
+            match = re.match(r"#\s*(Q\d+)\s*[:\-]?\s*(.+)", stripped)
+            if not match:
+                match = re.match(
+                    r'print\(\s*["\'](Q\d+)\s*[:\-]?\s*(.+?)["\']\s*\)',
+                    stripped)
+            if not match:
+                match = re.match(r"(Q\d+)\s*[:\-]\s*(.+)", stripped)
+            if not match:
+                continue
+            label, question = match.group(1), match.group(2).strip()
+            question = question.rstrip('")').strip()
+            if label not in questions and len(question) > 3:
+                questions[label] = question[:200]
+    return [(label, questions[label])
+            for label in sorted(questions, key=lambda q: int(q[1:]))]
 
 
 def run_freecadcmd(freecadcmd, macro_path, log_path):
@@ -589,6 +627,21 @@ def main(argv=None):
         macro_path.write_text(macro_text, encoding="utf-8")
         (output_dir / f"macro_attempt{attempt}.py").write_text(macro_text, encoding="utf-8")
 
+        # Surface design questions NOW, not only in macro comments /
+        # run.log prints where the result page never shows them.
+        # A macro that invents provisional values while asking Q1-Q9
+        # must not later read as a clean PASS.
+        questions = extract_questions(content, macro_text)
+        if questions:
+            questions_text = "\n".join(f"{label}: {text}"
+                                       for label, text in questions)
+            (output_dir / "questions.txt").write_text(
+                questions_text + "\n", encoding="utf-8")
+            report_lines.append(
+                "Questions (unanswered, from macro): "
+                + "; ".join(f"{label}: {text}"
+                            for label, text in questions))
+
         hits = safety_check(macro_text)
         safety_line = f"Attempt {attempt}: safety hits: {hits if hits else 'none'}"
         report_lines.append(safety_line)
@@ -690,7 +743,16 @@ def main(argv=None):
                 preview_note = f"{render_script.name}: {exc}"
         if not preview_ok:
             report_lines.append(f"Previews: unavailable ({preview_note})")
-        report_lines.append("RESULT: PASS")
+        if questions:
+            # Still exit 0 (a valid solid was built), but NEVER a
+            # clean PASS: provisional values were used while these
+            # questions were unanswered. "RESULT: PASS" is kept as a
+            # substring so the web UI badge logic still matches.
+            report_lines.append(
+                "RESULT: PASS (provisional - questions pending, "
+                "see questions.txt)")
+        else:
+            report_lines.append("RESULT: PASS")
         write_report(output_dir / "report.txt", report_lines)
         print("\n".join(report_lines))
         return 0

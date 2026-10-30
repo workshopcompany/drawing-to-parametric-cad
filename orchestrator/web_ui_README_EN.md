@@ -48,8 +48,22 @@ folder.
 
 ## Check the result
 When a run finishes, the result page shows the exit code,
-`report.txt`, `guidance.txt` (on failure), the input images, result
-previews, and the output file list with download links. The result
+`report.txt`, `guidance.txt` (on failure), `questions.txt` (when the
+macro asked questions), the input images, result previews, and the
+output file list with download links.
+If the macro asked Q1–Q9 questions, they are extracted to
+`questions.txt` and shown on the QA tab. A result built with
+provisional values while questions were unanswered is shown as
+"success (provisional — questions pending)", not a clean success.
+Answer the questions and rerun.
+
+## Output folders (timestamped, never overwritten)
+Running with the default (`./my_run_output`) creates a timestamped
+folder instead (e.g. `my_run_output_20261030_090411`). Specifying a
+folder that already holds a previous result creates a timestamped
+sibling folder. An empty new folder is used as-is. Timestamped
+sibling folders (not nested date subfolders) keep the recent-runs
+list working, since it scans the server folder's top level. The result
 page has tabs (Drawing recognition / Parameters & 3D / FreeCAD
 export / QA log) and an interactive 3D viewer (`viewer3d.js`, based on
 `tris.json`, no CDN) so you can rotate the model and check its shape.

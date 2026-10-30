@@ -35,6 +35,15 @@ python3 run_pipeline.py --drawing my_drawing.png --text "부품 설명" --output
   기하 번호, 정확한 오류, 원인, 질문/대안을 적어.
 - 설계/치수 질문이 나오면 치수를 지어내지 않고 멈춰. 답을 주고 다시 실행해.
 
+## 질문과 임시 결과
+- 매크로에 Q1~Q9 같은 질문이 있으면, `<output-dir>/questions.txt`로
+  뽑히고 report.txt에도 적혀. 결과 페이지 QA 탭에서 바로 보여.
+- 질문이 있는데도 솔리드가 만들어지면, 종료 코드는 0이지만 결과는
+  “PASS (provisional — questions pending)”야. 그냥 PASS가 아니야.
+  임시값으로 만든 모델이니까, 답을 주고 다시 실행해.
+- 안전 검사는 주석을 검사하지 않아. 주석에 “AttachmentOffset”이라고
+  적혀 있다고 실행을 막지 않아. 코드로 실제로 쓰는 경우만 막아.
+
 ## 아직 안 되는 것
 - .fcstd에서 2D 도면을 자동으로 뽑아내는 TechDraw는 아직 자동화가 안 됐어.
   지금은 FreeCAD GUI에서 TechDraw 페이지를 직접 만들어서 뷰를 뽑아.

@@ -74,6 +74,18 @@ run itself does not fail, and the report says "Previews: unavailable".
   question or alternative.
 - Design/dimension questions are never self-fixed: the run stops
   instead of inventing a dimension. Answer the question and rerun.
+
+## Questions and provisional results
+- If the macro asks Q1–Q9 questions, they are extracted to
+  `<output-dir>/questions.txt` and listed in `report.txt`, and shown
+  on the web UI QA tab.
+- If a solid is built while questions are unanswered, the exit code
+  is still 0, but the result is "PASS (provisional — questions
+  pending)", not a clean PASS. It was built with provisional values,
+  so answer and rerun.
+- The safety check does not check comments. A comment mentioning
+  "AttachmentOffset" does not block a macro; only actual code use
+  does.
 - Generated macros pass a safety check before running. Dangerous calls
   (subprocess, socket, urllib, requests, shutil, eval, exec, open,
   `os.system`, `os.environ`, `AttachmentOffset`) are rejected; plain

@@ -45,6 +45,7 @@ Security (read this before changing anything):
 """
 
 import argparse
+import datetime
 import html
 import json
 import mimetypes
@@ -215,6 +216,7 @@ def form_page():
     <h3 style="font-size:14px;">&#129521; 실행 설정</h3>
     <label for="output_dir">출력 폴더</label>
     <input type="text" id="output_dir" name="output_dir" value="./my_run_output">
+    <p class="note">기본값이면 실행 시각이 붙은 폴더(예: my_run_output_20261030_090411)로 자동 생성돼 예전 결과가 덮어씌워지지 않습니다. 이미 결과가 있는 폴더를 지정하면 시각이 붙은 형제 폴더로 바뀝니다.</p>
     <label for="freecadcmd">freecadcmd</label>
     <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
@@ -385,6 +387,30 @@ def resolve_output_dir(raw):
     if not path.is_absolute():
         path = Path.cwd() / path
     return path.resolve()
+
+
+def resolve_run_output_dir(raw):
+    """Timestamped sibling folder so a run never overwrites the last.
+
+    Rules (Oct 30 home-run lesson: every run overwrote
+    ./my_run_output, losing the previous model/report):
+    - Default folder (./my_run_output) -> ./my_run_output_YYYYMMDD_HHMMSS
+    - An explicit folder that already holds a previous result
+      (report.txt or model.fcstd) -> <folder>_YYYYMMDD_HHMMSS
+    - An explicit, empty/new folder -> used as-is.
+    Sibling folders (not nested date subfolders) keep the recent-runs
+    list working, since it scans the server cwd's top level.
+    """
+    path = resolve_output_dir(raw)
+    default = resolve_output_dir("./my_run_output")
+    needs_stamp = (path == default) or (
+        path.is_dir()
+        and ((path / "report.txt").is_file()
+             or (path / "model.fcstd").is_file()))
+    if needs_stamp:
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = Path(f"{path}_{stamp}")
+    return path
 
 
 def safe_download_path(output_dir, requested):
@@ -589,6 +615,16 @@ def result_page(output_dir, returncode, stdout_tail=""):
     guidance = output_dir / "guidance.txt"
     if guidance.is_file():
         guidance_text = guidance.read_text(encoding="utf-8", errors="replace")
+    questions_text = ""
+    questions_file = output_dir / "questions.txt"
+    if questions_file.is_file():
+        questions_text = questions_file.read_text(encoding="utf-8",
+                                                  errors="replace")
+    # A provisional PASS is still exit 0, but the banner must say so:
+    # provisional values were used while questions were unanswered.
+    if returncode == 0 and "provisional" in report_text:
+        banner = ("<span class=\"status-warn\">⚠️ 성공 (임시 — 질문 대기 중, "
+                  "questions.txt 확인)</span>")
 
     def view_link(name):
         query = urllib.parse.urlencode({"dir": str(output_dir), "file": name})
@@ -685,6 +721,7 @@ def result_page(output_dir, returncode, stdout_tail=""):
       <table class="files"><tr><th>파일</th><th>bytes</th><th>링크</th></tr>{file_rows}</table></div>
     </div>
     <div class="tab-panel" id="r4">
+      <div class="card"><h3>❓ questions.txt (미답변 질문)</h3><pre>{html.escape(questions_text) if questions_text else "(없음 — 이번 매크로에 질문이 없습니다)"}</pre><p class="note">매크로 주석/출력에서 뽑은 질문입니다. 임시값으로 만든 결과라면, 답을 주고 다시 실행하세요.</p></div>
       <div class="grid2">
         <div class="card"><h3>report.txt</h3><pre>{html.escape(report_text) if report_text else "(없음)"}</pre></div>
         <div class="card"><h3>guidance.txt</h3><pre>{html.escape(guidance_text) if guidance_text else "(없음 — 성공 시 생기지 않습니다)"}</pre></div>
@@ -908,7 +945,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(400, data)
             return
 
-        output_dir = resolve_output_dir(fields.get("output_dir", ""))
+        output_dir = resolve_run_output_dir(fields.get("output_dir", ""))
         output_dir.mkdir(parents=True, exist_ok=True)
         original_name, drawing_bytes = files["drawing"]
         suffix = Path(original_name).suffix or ".png"
