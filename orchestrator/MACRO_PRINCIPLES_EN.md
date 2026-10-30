@@ -21,13 +21,21 @@ Terminology: use "empty hole" for a hole, never "void".
 - If a problem arises, propose an alternative or ask a question to solve it, then retry once after the answer.
   Do not stop silently, and do not retry endlessly without a question/answer.
 - Self-fix rule (user Oct 29, 2026 17:59 EDT): code/API errors (syntax, constraint form, arc form,
-  point order, Base link) are self-fixed and rerun, up to 3 attempts total, without asking the user
-  between attempts. Log each fix (what changed, why, which line). On the 3rd failure, STOP and guide
+  point order, Base link) are self-fixed and rerun, up to 4 attempts total, without asking the user
+  between attempts. Log each fix (what changed, why, which line). On the 4th failure, STOP and guide
   with feature name, geometry index, exact error, cause, and a specific question or alternative.
   Dimension/design questions are NOT self-fixed — ask the user immediately, do not invent.
 - Ask the user only about design/dimensions that only the user knows. Do NOT ask the user about
   FreeCAD implementation methods (placement method, API names, constraint names) — those are
   program rules below, decide them internally.
+
+### Failure-finding method
+
+- Do not trust the error message alone. Inspect the actual artifact: sketch state, solved geometry, solids count after each feature.
+- After each feature, print the solved coordinates and compare them to the intended values. The coordinate that moved names the bad constraint.
+- Isolate: test one suspected change alone, re-run, and confirm before moving on.
+- Report exactly: feature name, geometry index, exact error, gap size vs tolerance, cause hypothesis, and a specific question or alternative. A vague FAIL is not a diagnosis.
+- When a reference file is attached (on retry), find the section matching the exact error, quote it, then apply it. If no reference is attached, do not invent one.
 
 ## 1. Parametric tree, unconditional
 

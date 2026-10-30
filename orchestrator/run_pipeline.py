@@ -9,7 +9,7 @@ replace FreeCAD. It:
      FreeCAD macro,
   3. saves the FULL raw API response before extracting any code,
   4. safety-checks the macro, runs it with freecadcmd,
-  5. self-fixes code/API errors only, up to 3 attempts total,
+  5. self-fixes code/API errors only, up to 4 attempts total,
   6. verifies the resulting STEP independently of the macro log.
 
 Usage (real run, from the orchestrator/ folder):
@@ -208,7 +208,8 @@ def summarize_outline_json(data, max_chars=6000):
     return text
 
 
-def build_prompt(principles_text, gear_text, user_text, output_dir, outline_text=""):
+def build_prompt(principles_text, gear_text, user_text, output_dir, outline_text="",
+                 reference_text=""):
     parts = [principles_text]
     if gear_text:
         parts.append(gear_text)
@@ -217,6 +218,16 @@ def build_prompt(principles_text, gear_text, user_text, output_dir, outline_text
     if outline_text:
         parts.append(outline_text)
     parts.append(MACRO_INSTRUCTION)
+    # Reference position (documented, consistent): a retry-only
+    # "Reference" part goes HERE, after the instruction and before
+    # the output paths. Prompt order is otherwise unchanged:
+    # principles -> gear ref -> user text -> outline -> instruction
+    # -> Reference (retry only) -> output paths. The reference is
+    # never prepended ahead of the principles and never appended
+    # after the output paths, so the LLM always sees it in the
+    # same place on every retry.
+    if reference_text:
+        parts.append(reference_text)
     # Tell the macro where its own outputs must go. These paths are
     # runtime values from --output-dir, never hardcoded in this script.
     parts.append(
@@ -421,6 +432,273 @@ def run_freecadcmd(freecadcmd, macro_path, log_path):
             timeout=1800,
         )
     return result.returncode
+
+
+
+# ---- Diagnose -> category reference -> retry staging ----
+# Total attempt budget. Attempt 1 is the first generation; attempts
+# 2-4 are self-fixes. On the LAST attempt (4) all category files are
+# attached as fallback, whatever the diagnosis says.
+MAX_ATTEMPTS = 4
+
+# Category -> reference file, relative to the orchestrator folder
+# (this script's directory). Fixed interface: do not rename keys or
+# move these paths without updating the parallel reference writer.
+# gear reuses the existing GEAR_CREATION_REFERENCE.md; the other
+# files live under references/ and may not exist yet when a retry
+# runs -- load_reference_texts() skips a missing file gracefully
+# (note, never crash) instead of failing the retry.
+CATEGORY_REFERENCES = {
+    "gear": "GEAR_CREATION_REFERENCE.md",
+    "sketch_wire": "references/sketch_wire.md",
+    "constraint_solver": "references/constraint_solver.md",
+    "solid_pad": "references/solid_pad.md",
+    "thread_tap": "references/thread_tap.md",
+    "outline_curve": "references/outline_curve.md",
+}
+ALL_CATEGORIES = ["sketch_wire", "constraint_solver", "solid_pad",
+                  "thread_tap", "outline_curve", "gear"]
+
+# Cause-category keywords, checked in priority order. These match
+# the DIAGNOSIS (cause), not a bare symptom word: e.g. "wire not
+# closed" is a sketch_wire cause, while a solved coordinate that
+# moved/flipped is a constraint_solver cause even when the visible
+# symptom is also a bad wire. Order matters: gear/thread/outline
+# causes are more specific than the generic pad/wire causes below.
+_CATEGORY_RULES = [
+    ("gear", ("involute", "gear tooth", "gear teeth", "tooth profile")),
+    ("thread_tap", ("tap", "thread", "tap drill", "tap-drill",
+                    "drill diameter")),
+    ("outline_curve", ("spline", "b-spline", "bspline", "bezier",
+                        "outline curve", "outline point", "curve fit")),
+    ("sketch_wire", ("wire not closed", "wire is not closed",
+                     "open wire", "not a closed wire", "unclosed wire",
+                     "wire gap", "sketch not closed", "profile not closed",
+                     "not closed")),
+    ("constraint_solver", ("redundant constraint", "conflicting constraint",
+                           "over-constrained", "over constrained",
+                           "under-constrained", "under constrained",
+                           "solver", "constraint", "moved", "drift",
+                           "flipped", "distancex", "distancey",
+                           "fully constrained")),
+    ("solid_pad", ("pad", "pocket", "invalid solid", "multiple solids",
+                   "null shape", "fusion", "fuse", "boolean",
+                   "no solid", "empty solid")),
+]
+
+
+def clean_model_outputs(output_dir):
+    """Delete model.fcstd/model.step before an attempt.
+
+    Without this, verification after a failed attempt that saved
+    nothing would read the PREVIOUS attempt's STEP and misattribute
+    that old result to the new attempt. Returns the names deleted.
+    Only the two model outputs are removed; logs, macros, raw
+    responses, and self_fix_log.txt are preserved.
+    """
+    deleted = []
+    for name in ("model.fcstd", "model.step"):
+        path = Path(output_dir) / name
+        try:
+            if path.is_file():
+                path.unlink()
+                deleted.append(name)
+        except OSError:
+            pass
+    return deleted
+
+
+def inspect_fcstd_features(fcstd_path):
+    """Best-effort feature list from a .fcstd file (stdlib only).
+
+    A .fcstd is a zip; Document.xml inside lists objects with
+    Name/Type attributes. Returns [(name, type), ...] or [] when
+    the file is missing, unreadable, or has no parseable objects.
+    Never raises: this is diagnostic context, not a gate.
+    """
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(str(fcstd_path)) as zf:
+            xml_text = zf.read("Document.xml").decode("utf-8",
+                                                      errors="replace")
+        root = ET.fromstring(xml_text)
+        out = []
+        for obj in root.iter("Object"):
+            name = obj.get("name") or obj.get("Name")
+            typ = obj.get("type") or obj.get("Type")
+            if name:
+                out.append((name, typ or ""))
+        return out
+    except Exception:
+        return []
+
+
+def _first_match(patterns, text):
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match
+    return None
+
+
+def classify_diagnosis(diagnosis_text):
+    """Map a diagnosis to one category, or None when unclear.
+
+    Takes the full diagnosis text (cause hypothesis included), so
+    the mapping keys off cause, not a single symptom word. Returns
+    None when no rule matches: the caller then attaches the full
+    reference set instead of guessing a category.
+    """
+    low = (diagnosis_text or "").lower()
+    for category, keywords in _CATEGORY_RULES:
+        if any(kw in low for kw in keywords):
+            return category
+    return None
+
+
+def build_diagnosis(run_log_text="", verification=None, last_error="",
+                    fcstd_path=None):
+    """Build a structured diagnosis from the ACTUAL artifact.
+
+    Sources, in order: the failed attempt's freecadcmd log, its
+    verification output, and (best-effort) the .fcstd feature list.
+    Never from the error message alone: when the log carries no
+    feature/geometry detail, those fields say so explicitly instead
+    of inventing one. Returns a dict with a ready-to-log `report`
+    string plus the individual fields and the selected `category`
+    (or None when unclear).
+    """
+    log_text = run_log_text or ""
+    combined = "\n".join([log_text, last_error or ""])
+    if verification:
+        combined += f"\nverification: {verification}"
+    # Exact error: last log line mentioning an error/failure, else
+    # the orchestrator's last_error (truncated, verbatim).
+    exact_error = ""
+    for line in reversed(log_text.splitlines()):
+        if re.search(r"error|exception|failed|failure|traceback",
+                     line, re.IGNORECASE):
+            exact_error = line.strip()[:500]
+            break
+    if not exact_error:
+        exact_error = (last_error or "no error text recorded")[:500]
+    # Feature name: first recognisable feature token near an error
+    # line, else the first feature token anywhere in the log.
+    feature = "not identifiable from log"
+    error_lines = [ln for ln in log_text.splitlines()
+                   if re.search(r"error|exception|failed", ln,
+                                re.IGNORECASE)]
+    feature_match = _first_match(
+        [r"\b(Sketch\w*|Pad\w*|Pocket\w*|Fillet\w*|Chamfer\w*|"
+         r"InvoluteGear\w*|Thread\w*|Tap\w*)\b"],
+        "\n".join(error_lines) or log_text)
+    if feature_match:
+        feature = feature_match.group(1)
+    # Geometry index, if the log names one.
+    geometry_index = "not identifiable from log"
+    geo_match = re.search(
+        r"(?:geometry|geoid|geo)[ _#]*(\d+)", combined, re.IGNORECASE)
+    if geo_match:
+        geometry_index = geo_match.group(1)
+    # Gap size vs tolerance, only when numbers are actually present.
+    gap = "not stated in log"
+    gap_match = re.search(r"gap[^0-9]{0,30}([0-9]+(?:\.[0-9]+)?)\s*mm?",
+                          combined, re.IGNORECASE)
+    tol_match = re.search(r"tolerance[^0-9]{0,30}([0-9]+(?:\.[0-9]+)?)",
+                          combined, re.IGNORECASE)
+    if gap_match:
+        gap = f"gap {gap_match.group(1)} mm"
+        gap += (f" vs tolerance {tol_match.group(1)} mm"
+                if tol_match else " vs tolerance not stated")
+    elif verification and isinstance(verification, dict):
+        gap = (f"verification: solids={verification.get('solids')}, "
+               f"valid={verification.get('valid')} "
+               f"(gate: solids==1 and valid True)")
+    # Feature list from the partial .fcstd, when one survived.
+    fcstd_note = ""
+    if fcstd_path is not None and Path(fcstd_path).is_file():
+        feats = inspect_fcstd_features(fcstd_path)
+        if feats:
+            fcstd_note = ("fcstd features: " +
+                          ", ".join(f"{n} ({t})" for n, t in feats[:20]))
+    # Cause hypothesis: category-driven, never a bare symptom repeat.
+    cause_hypotheses = {
+        "gear": "gear tooth profile / InvoluteGear setup cause",
+        "thread_tap": "tap/thread tool or drill-diameter cause",
+        "outline_curve": "outline curve / spline fitting cause",
+        "sketch_wire": "sketch wire closure cause (open/unclosed wire)",
+        "constraint_solver": "sketch constraint/solver cause "
+                             "(redundant, conflicting, or drifted constraint)",
+        "solid_pad": "pad/pocket/solid formation cause "
+                     "(invalid, multiple, or null solid)",
+    }
+    category = classify_diagnosis(combined)
+    if category:
+        cause = cause_hypotheses[category]
+    else:
+        cause = ("unclear from log + verification - no single cause "
+                 "category matched; full reference set attached")
+    report = (
+        "Diagnosis (from actual artifact, not error message alone):\n"
+        f"- Feature: {feature}\n"
+        f"- Geometry index: {geometry_index}\n"
+        f"- Exact error: {exact_error}\n"
+        f"- Gap size vs tolerance: {gap}\n"
+        f"- Cause hypothesis: {cause}\n"
+        + (f"- {fcstd_note}\n" if fcstd_note else "")
+        + f"- Category: {category or 'unclear -> full set'}"
+    )
+    return {"feature": feature, "geometry_index": geometry_index,
+            "exact_error": exact_error, "gap": gap,
+            "cause_hypothesis": cause, "category": category,
+            "report": report}
+
+
+def load_reference_texts(categories, script_dir=None):
+    """Load reference files for categories; skip missing gracefully.
+
+    Returns (reference_block, notes): reference_block is the single
+    clearly-marked "Reference" part for the prompt (empty string
+    when every file is missing), notes lists one line per category
+    for self_fix_log.txt. A missing file is never a crash and never
+    blocks the retry -- the parallel reference writer may not have
+    finished that file yet.
+    """
+    base = Path(script_dir) if script_dir else Path(__file__).resolve().parent
+    blocks, notes = [], []
+    for category in categories:
+        rel = CATEGORY_REFERENCES.get(category)
+        if rel is None:
+            notes.append(f"Reference {category}: unknown category, skipped.")
+            continue
+        path = base / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            notes.append(f"Reference {category}: missing ({rel}), skipped.")
+            continue
+        blocks.append(f"--- Reference: {category} ({rel}) ---\n{text.strip()}")
+        notes.append(f"Reference {category}: attached ({rel}).")
+    if not blocks:
+        return "", notes
+    block = ("Reference (diagnosis-matched, retry only - find the "
+             "section matching the exact error, quote it, then apply "
+             "it; do not invent a reference):\n\n" + "\n\n".join(blocks))
+    return block, notes
+
+
+def select_retry_categories(diagnosis, attempt):
+    """Categories to attach on a retry attempt.
+
+    Attempt MAX_ATTEMPTS always gets the full set as fallback. An
+    earlier retry gets its single diagnosed category, or the full
+    set when the diagnosis yields no clear category.
+    """
+    if attempt >= MAX_ATTEMPTS:
+        return list(ALL_CATEGORIES)
+    category = (diagnosis or {}).get("category")
+    return [category] if category else list(ALL_CATEGORIES)
 
 
 
@@ -990,16 +1268,47 @@ def main(argv=None):
     step_path = output_dir / "model.step"
     last_error = ""
     last_feature = "unknown (see run.log and macro.py)"
-    for attempt in range(1, 4):
+    # Previous attempt's artifacts, for the next attempt's diagnosis.
+    # Reset at the start of each retry (below) and filled in only
+    # when that attempt actually runs freecadcmd / verification, so
+    # a safety/API failure is never diagnosed from an older run's log.
+    prev_run_log_text = ""
+    prev_verification = None
+    prev_ran = False
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         append_log(self_fix_log,
-                   f"Attempt {attempt}/3 started.")
+                   f"Attempt {attempt}/{MAX_ATTEMPTS} started.")
         if attempt == 1:
             prompt_text = base_prompt
         else:
+            # Diagnose -> category reference -> retry: the diagnosis
+            # is built from the previous attempt's ACTUAL artifact
+            # (its freecadcmd log + verification + .fcstd features),
+            # never from the error message alone, and the matched
+            # reference file(s) go into the prompt's Reference part
+            # (after the instruction, before the output paths -- see
+            # build_prompt). Attempt 4 always gets the full set.
+            last_diagnosis = build_diagnosis(
+                prev_run_log_text, prev_verification, last_error,
+                fcstd_path)
+            retry_categories = select_retry_categories(last_diagnosis,
+                                                       attempt)
+            reference_text, reference_notes = load_reference_texts(
+                retry_categories)
+            for note in reference_notes:
+                append_log(self_fix_log, f"Attempt {attempt}: {note}")
+            append_log(self_fix_log,
+                       f"Attempt {attempt}: {last_diagnosis['report']}")
+            append_log(self_fix_log,
+                       f"Attempt {attempt}: categories: {retry_categories}")
+            retry_prompt = build_prompt(
+                principles_text, gear_text, args.text, output_dir,
+                outline_text, reference_text=reference_text)
             prompt_text = (
-                base_prompt
+                retry_prompt
                 + "\n\nPrevious attempt failed with this exact error:\n"
                 + last_error
+                + "\n" + last_diagnosis["report"]
                 + "\nFix ONLY the code/API error described above. "
                 + "Do not change any dimension, outline, angle, or "
                 + "user-confirmed answer. Do not drop any Q-lines or "
@@ -1012,6 +1321,17 @@ def main(argv=None):
                 + "os.path.join / os.makedirs for output paths are "
                 + "allowed; save with doc.saveAs() / Part.export()."
             )
+            # Reset previous-attempt artifacts for this attempt.
+            prev_run_log_text = ""
+            prev_verification = None
+            prev_ran = False
+        # Stale-output guard: delete any previous attempt's model
+        # outputs BEFORE this attempt, so verification below can
+        # never read a stale STEP and pass/fail the wrong attempt.
+        cleaned = clean_model_outputs(output_dir)
+        if cleaned:
+            append_log(self_fix_log,
+                       f"Attempt {attempt}: cleaned stale outputs: {cleaned}")
         messages = build_messages(prompt_text, image_b64, mime_type,
                                   outline_image=outline_image)
         try:
@@ -1104,6 +1424,9 @@ def main(argv=None):
             continue
         (output_dir / f"run_attempt{attempt}.log").write_text(
             run_log.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        prev_run_log_text = run_log.read_text(encoding="utf-8",
+                                              errors="replace")
+        prev_ran = True
         append_log(self_fix_log,
                    f"Attempt {attempt}: freecadcmd exit {returncode}.")
         if returncode != 0:
@@ -1122,6 +1445,7 @@ def main(argv=None):
             continue
 
         verification = verify_step(args.freecadcmd, step_path, output_dir)
+        prev_verification = verification
         report_lines.append(f"Attempt {attempt}: verification: {verification}")
         append_log(self_fix_log,
                    f"Attempt {attempt}: verification: {verification}")
@@ -1225,22 +1549,26 @@ def main(argv=None):
         print("\n".join(report_lines))
         return 0
 
-    # 3rd failure: STOP, guide, do NOT run a 4th time.
+    # 4th failure: STOP, guide, do NOT run a 5th time.
+    final_diagnosis = build_diagnosis(
+        prev_run_log_text, prev_verification, last_error, fcstd_path)
     guidance = (
-        "GUIDANCE (3rd failure, stopped - no 4th run):\n"
+        "GUIDANCE (4th failure, stopped - no 5th run):\n"
         f"Feature/geometry: {last_feature}\n"
         f"Exact error: {last_error}\n"
         "Cause hypothesis: see self_fix_log.txt for the per-attempt "
         "errors; the last error above is the current cause.\n"
-        "What was tried: 3 attempts total (first generation + up to "
-        "2 regenerations with the exact error fed back). "
+        f"{final_diagnosis['report']}\n"
+        "What was tried: 4 attempts total (first generation + up to "
+        "3 regenerations with the exact error, diagnosis, and "
+        "matched reference fed back). "
         "See self_fix_log.txt.\n"
         "Question/alternative: fix the error above in the macro, or "
         "answer the design question if the error is a missing or "
         "ambiguous dimension. Do not retry without that fix/answer.\n"
     )
     (output_dir / "guidance.txt").write_text(guidance, encoding="utf-8")
-    report_lines.append("RESULT: FAIL - 3rd failure, see guidance.txt")
+    report_lines.append("RESULT: FAIL - 4th failure, see guidance.txt")
     write_report(output_dir / "report.txt", report_lines)
     print(guidance)
     return 1
