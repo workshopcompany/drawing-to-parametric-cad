@@ -55,6 +55,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 API_URL = "https://api.meta.ai/v1/chat/completions"
@@ -1001,12 +1002,14 @@ def build_matching(verification, macro_text, user_text):
         if _is_reference_dim(d):
             rows.append({"no": d["id"], "item": item,
                          "drawing": d["value"], "modeling": None,
-                         "result": "? (참조치수)"})
+                         "result": "? (참조치수)", "view": d.get("view")})
             continue
         pm = _find_macro_param(d["label"], d["value"], macro_params)
         if pm is not None:
             used_macro.add(pm[0])
-            rows.append(_match_row(d["id"], item, d["value"], pm[1]))
+            row = _match_row(d["id"], item, d["value"], pm[1])
+            row["view"] = d.get("view")
+            rows.append(row)
             continue
         kind = _keyword_target(d["label"])
         modeling = None
@@ -1021,7 +1024,9 @@ def build_matching(verification, macro_text, user_text):
             u = d["label"].upper()
             if "TOTAL" in u or "OVERALL" in u or "AXIAL" in u:
                 modeling = verification.get("size_x")
-        rows.append(_match_row(d["id"], item, d["value"], modeling))
+        row = _match_row(d["id"], item, d["value"], modeling)
+        row["view"] = d.get("view")
+        rows.append(row)
     # Macro parameters.
     for name, value in macro_params:
         if name in used_macro:
@@ -1064,6 +1069,241 @@ def build_matching(verification, macro_text, user_text):
     rows.append(_match_row("—", "Volume (reference only)", None,
                            verification.get("volume")))
     return rows
+
+
+def _preferred_axis(label, kind, view):
+    """(Preferred axis, restricted?) for a measurement.
+
+    Depth/thickness words always mean the out-of-front-plane axis
+    (Y). Otherwise the view decides (front: width X, height Z;
+    side: width Y, height Z; top: width X, height Y). Section views
+    have an unknown cutting plane, so no restriction (kind-only
+    fallback axis is used for ranking only). Flats and unknown
+    kinds get no preference. Restricted rows only accept candidates
+    on the preferred axis or axis-free/angled ones; other axes are
+    excluded outright, because a height measured as an X distance
+    (a parallel-face coincidence) is not a measurement of it.
+    """
+    u = (label or "").upper()
+    if "DEPTH" in u or "THICK" in u:
+        return "Y", True
+    view_map = {"front": {"width": "X", "height": "Z", "length": "X"},
+                "side": {"width": "Y", "height": "Z", "length": "X"},
+                "top": {"width": "X", "height": "Y", "length": "X"}}
+    if view in view_map and kind in view_map[view]:
+        return view_map[view][kind], True
+    return {"height": "Z", "width": "X", "length": "X"}.get(kind), False
+
+
+def match_measured(label, value, view, measurements):
+    """Match one D-row to the real-measurement battery.
+
+    Returns (measured_value, method) or (None, None). The measured
+    column shows the VALUE only, no verdict: the user judges it
+    against the drawing value (general tolerance ±0.1, not the
+    strict 0.01 table tolerance).
+    - Diameter/radius rows use cylinder faces only.
+    - Offset/position/tolerance rows are not measured in v1:
+      they are positions, not sizes.
+    - Every other size row takes the best battery value (face
+      distances, edge lengths, vertex deltas, section extents).
+      Rows with a view-determined axis (front/side/top, or
+      depth/thickness words) only accept candidates on that axis
+      or axis-free/angled ones; other axes are excluded outright,
+      because a height measured as an X distance (a parallel-face
+      coincidence) is not a measurement of it. Within the allowed
+      set, ranking is axis first, then closeness, but only within
+      each pool's band: axis-aligned face, section, and bbox values
+      use max(0.1, 10% of value); exact or numerous values (edges,
+      vertex deltas, angled face pairs) use 0.05, because dense
+      pools "find" coincidences under a loose band (a
+      peak-minus-slot-end delta posing as a tip height, an angled
+      face pair 1.049 posing as a 0.97 height), while genuine
+      dimensions agree closely (peak height 1.739 vs 1.70 is
+      within 0.05).
+    The method string says what was measured, so any remaining
+    wrong-axis coincidence stays visible.
+    """
+    if not measurements:
+        return None, None
+    u = (label or "").upper()
+    if ("OFFSET" in u or "POSITION" in u or "TOLERANCE" in u
+            or "PARALLEL" in u or "//" in label):
+        return None, None
+    kind = _keyword_target(label)
+    if kind == "dia":
+        c = _near_cyl(measurements.get("cyl_diams", []), value)
+        return (c, "cylinder diameter") if c is not None else (None, None)
+    if kind == "radius":
+        c = _near_cyl(measurements.get("cyl_diams", []), value * 2)
+        return (c / 2, "cylinder radius") if c is not None else (None, None)
+    pref, restricted = _preferred_axis(label, kind, view)
+
+    def rank(axis):
+        if pref is None or axis is None or axis == "angled":
+            return 1
+        if axis == pref:
+            return 0
+        return 2
+
+    def allowed(axis):
+        # Restricted rows: only the preferred axis, plus axis-free
+        # and angled candidates (a slot's width is measured
+        # perpendicular to the slot, so angled faces/edges stay).
+        if not restricted:
+            return True
+        return axis is None or axis == "angled" or axis == pref
+
+    wide_band = max(0.1, 0.1 * value)
+    exact_band = 0.05  # exact CAD values (edges, vertex deltas)
+    cands = []
+    for d in measurements.get("face_distances", []):
+        axis = d.get("axis")
+        ax = None if axis == "angled" else axis
+        if allowed(ax):
+            # Angled pairs are numerous (slot/diagonal faces at odd
+            # angles), so they get the tight band like exact values;
+            # axis-aligned pairs are few and keep the wide band.
+            band = exact_band if axis == "angled" else wide_band
+            cands.append((d["value"], f"parallel faces ({axis or '?'})",
+                          rank(ax), band))
+    for e in measurements.get("edge_lengths", []):
+        axis = e.get("axis")
+        ax = None if axis == "angled" else axis
+        if allowed(ax):
+            cands.append((e["value"], f"edge length ({axis or '?'})",
+                          rank(ax), exact_band))
+    for axis, diffs in (measurements.get("vertex_deltas") or {}).items():
+        if allowed(axis):
+            for diff in diffs:
+                cands.append((diff, f"vertex Δ{axis}", rank(axis),
+                              exact_band))
+    for s in measurements.get("sections", []):
+        if allowed("X"):
+            cands.append((s["x_extent"],
+                          f"section X extent @ z={s['z']}",
+                          rank("X"), wide_band))
+        if allowed("Y"):
+            cands.append((s["y_extent"],
+                          f"section Y extent @ z={s['z']}",
+                          rank("Y"), wide_band))
+    for axis, ext in (measurements.get("bbox_extents") or {}).items():
+        if allowed(axis):
+            cands.append((ext, f"bbox {axis} extent", rank(axis),
+                          wide_band))
+    if not cands:
+        return None, None
+    # Rank within bands, in two tiers: preferred-axis and
+    # angled/axis-free candidates compete on closeness alone (an
+    # exact angled slot width beats a near X distance), while
+    # other-axis candidates only win if tier A is empty (a
+    # Z height beats an exact X coincidence). Filtering to the
+    # bands first matters: a far-away preferred-axis value must
+    # never beat an exact angled face.
+    near = [c for c in cands if abs(c[0] - value) <= c[3] + 1e-9]
+    if not near:
+        return None, None
+    best = min(near, key=lambda c: (0 if c[2] in (0, 1) else 1,
+                                    abs(c[0] - value)))
+    return best[0], best[1]
+
+
+def run_measure_mode(output_dir, freecadcmd):
+    """Measure an existing result folder's STEP, update matching.json.
+
+    Runs measure_step.py (next to this script) under freecadcmd on
+    <output_dir>/model.step, then fills the measured column of the
+    D-rows in matching.json and appends a summary to report.txt.
+    Returns 0 on success (even if some rows get no measurement),
+    1 on hard failure (no STEP, missing measure script, freecadcmd
+    failure, no measurements file).
+    """
+    script_dir = Path(__file__).resolve().parent
+    measure_script = script_dir / "measure_step.py"
+    step_path = output_dir / "model.step"
+    if not step_path.is_file():
+        print(f"MEASURE FAIL: no model.step in {output_dir}")
+        return 1
+    if not measure_script.is_file():
+        print(f"MEASURE FAIL: measure_step.py not found next to "
+              f"run_pipeline.py ({measure_script})")
+        return 1
+    if shutil.which(freecadcmd) is None and not Path(freecadcmd).is_file():
+        print(f"MEASURE FAIL: freecadcmd not found: {freecadcmd}")
+        return 1
+    measurements_path = output_dir / "measurements.json"
+    log_path = output_dir / "measure_log.txt"
+    env = dict(os.environ)
+    env["MEASURE_OUT"] = str(measurements_path)
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        result = subprocess.run(
+            [freecadcmd, str(measure_script), str(step_path)],
+            stdout=log_file, stderr=subprocess.STDOUT, env=env)
+    # freecadcmd exits 0 even on macro errors, so the file is the
+    # only trustworthy signal.
+    if not measurements_path.is_file():
+        print("MEASURE FAIL: measurements.json was not written "
+              f"(see {log_path})")
+        return 1
+    try:
+        measurements = json.loads(measurements_path.read_text(
+            encoding="utf-8"))
+    except Exception as exc:
+        print(f"MEASURE FAIL: cannot read measurements.json: {exc}")
+        return 1
+    if measurements.get("error"):
+        print(f"MEASURE FAIL: {measurements['error']}")
+        return 1
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    measurements["measured_at"] = stamp
+    measurements_path.write_text(
+        json.dumps(measurements, indent=1, ensure_ascii=False),
+        encoding="utf-8")
+    matching_path = output_dir / "matching.json"
+    rows = []
+    if matching_path.is_file():
+        try:
+            rows = json.loads(matching_path.read_text(encoding="utf-8"))
+        except Exception:
+            rows = []
+    measured_count = 0
+    d_count = 0
+    for row in rows:
+        no = str(row.get("no", ""))
+        if not re.match(r"D\d+$", no):
+            continue  # only D-rows get a measured column
+        d_count += 1
+        item = str(row.get("item", ""))
+        view = row.get("view")
+        if not view:
+            vm = re.search(r"\[(front|section|side|top)\]\s*$", item)
+            view = vm.group(1) if vm else None
+        label = re.sub(r"\s*\[(front|section|side|top)\]\s*$", "",
+                       item)
+        value = row.get("drawing")
+        if value is None:
+            row["measured"] = None
+            row["measured_method"] = None
+            continue
+        measured, method = match_measured(label, float(value), view,
+                                          measurements)
+        row["measured"] = measured
+        row["measured_method"] = method
+        if measured is not None:
+            measured_count += 1
+    matching_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False),
+                             encoding="utf-8")
+    summary = (f"Measurement (실측) {stamp}: {measured_count}/{d_count} "
+               f"D-rows measured (see matching.json measured column; "
+               f"methods in measurements.json).")
+    print(summary)
+    report_path = output_dir / "report.txt"
+    try:
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write("\n" + summary + "\n")
+    except OSError:
+        pass
+    return 0
 
 
 def verify_step(freecadcmd, step_path, output_dir):
@@ -1164,8 +1404,9 @@ def parse_args(argv=None):
         "drawing + principles -> Meta API macro -> freecadcmd -> "
         "verified .fcstd + STEP. See the top-of-file docstring."
     )
-    parser.add_argument("--drawing", required=True,
-                        help="Drawing image file (read, never copied into the repo).")
+    parser.add_argument("--drawing", default="",
+                        help="Drawing image file (read, never copied into the repo). "
+                        "Required unless --measure is given.")
     parser.add_argument("--outline", default="",
                         help="Optional outline attachment (snap-tool JSON or "
                         "outline image). JSON is summarized for the prompt "
@@ -1195,6 +1436,12 @@ def parse_args(argv=None):
                         help="Ask questions FIRST and build nothing yet: "
                         "the LLM lists Q1... questions only, no macro, "
                         "no model. Answer via the web UI, then build.")
+    parser.add_argument("--measure", action="store_true",
+                        help="Measure an existing result folder instead of "
+                        "building: run measure_step.py on its model.step "
+                        "and add a measured column to matching.json. "
+                        "Needs only --output-dir (+ --freecadcmd); no "
+                        "drawing, no API call.")
     return parser.parse_args(argv)
 
 
@@ -1202,6 +1449,10 @@ def main(argv=None):
     args = parse_args(argv)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.measure:
+        return run_measure_mode(output_dir, args.freecadcmd)
+    if not args.drawing:
+        die("--drawing is required unless --measure is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():

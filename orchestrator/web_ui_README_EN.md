@@ -239,3 +239,24 @@ This UI runs only on the user's own PC. It does not let Muse control
 that PC, and it does not replace FreeCAD. FreeCAD 1.1.4 is needed
 separately. Real API runs must be tested at home with the user's own
 key.
+
+## Measure button and table export (matching tab)
+
+- Measure (실측): on a result page with a model.step, the matching
+  card has a Measure button (freecadcmd field next to it). It runs
+  `run_pipeline.py --measure` on that folder: no API call, no
+  rebuild. After measuring, the table gains a Measured column next
+  to Modeling value (method on hover, no verdict). The button shows
+  a "Measured." note with the timestamp afterwards. Re-measuring
+  overwrites the previous measurement.
+- Table export: every matching-table row has a checkbox on its
+  left (all checked by default). Select all / Deselect all buttons
+  and a format select (CSV / Excel .xlsx) sit under the table, with
+  a Save table button. Only checked rows are saved. CSV is UTF-8
+  with BOM so Excel on Windows reads Korean correctly, and it
+  uploads directly to Google Sheets; .xlsx is built with the
+  standard library only (no openpyxl needed) and opens in Excel
+  (also importable to Sheets). Numbers stay numeric in the sheet
+  so you can compute on them; empty means no value. The exported
+  columns are No, Item, Drawing, Modeling, Measured (when present),
+  Result.

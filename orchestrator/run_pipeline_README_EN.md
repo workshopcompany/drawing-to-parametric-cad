@@ -146,3 +146,35 @@ answering rebuilds.
   GUI to get 2D views.
 - PDF drawings are not supported yet: the pipeline has no PDF-to-image
   conversion. Convert a PDF drawing to PNG/JPG first.
+
+## Real measurement (실측): --measure mode
+
+`python3 run_pipeline.py --measure --output-dir <result folder>
+--freecadcmd <path>` measures an EXISTING result folder's model.step
+(no drawing, no API call, no rebuild) and adds a Measured column to
+matching.json. It runs measure_step.py under freecadcmd, which reports
+a battery of real geometry: parallel planar face distances, straight
+edge lengths (with direction axis), vertex coordinate differences
+from topological vertices only, horizontal section extents (25 Z
+levels), whole-part bbox extents, and cylinder diameters.
+
+Matching rules (match_measured): diameter/radius rows use cylinders
+only; offset/position/tolerance rows are not measured (positions,
+not sizes). Other size rows take the best battery value, but rows
+with a view-determined axis (front/side/top, or depth/thickness
+words) only accept candidates on that axis or angled ones; other
+axes are excluded. Bands: axis-aligned face/section/bbox values use
+max(0.1, 10% of value); exact or numerous values (edges, vertex
+deltas, angled face pairs) use 0.05, because dense pools "find"
+coincidences under a loose band. The measured value has NO verdict:
+compare it with the drawing value yourself (general tolerance ±0.1,
+not the strict 0.01 table tolerance). The method (e.g. "parallel
+faces (angled)") is stored per row and shown on hover.
+
+Honest gaps in v1 (shown as —, not faked): smooth curve maxima with
+no corner point (e.g. hook tip tops) have no vertex to measure from;
+tessellation points are deliberately NOT used for deltas, because
+mesh points exist near almost any value and would "confirm"
+anything. Files: measurements.json (+ measured_at), measure_log.txt,
+matching.json gains measured/measured_method per D-row, and a
+summary line is appended to report.txt.

@@ -276,6 +276,38 @@ S = {
                             "도면값은 LLM이 읽은 값, 또는 네가 확인한 답이야. "
                             "\u201c의도한 대로 만들었나\u201d를 보는 거지, "
                             "\u201c도면 진값과 같나\u201d를 증명이 아님."),
+    "th_measured": ("Measured", "실측값"),
+    "measure_btn": ("Measure", "실측"),
+    "measure_note": ("Measure real geometry from the STEP and add a "
+                     "Measured column next to Modeling value. The measured "
+                     "value has no verdict: compare it with the drawing "
+                     "value yourself.",
+                     "STEP에서 실제 형상을 재서 모델링값 옆에 실측값 칸을 "
+                     "추가합니다. 실측값에는 판정이 없습니다. 도면값과 "
+                     "직접 비교하세요."),
+    "measure_done": ("Measured.", "실측 완료."),
+    "err_measure_nostep": ("No model.step in this folder to measure.",
+                           "이 폴더에 실측할 model.step이 없습니다."),
+    "err_measure_failed": ("Measurement failed. See web_ui_measure.log and "
+                           "measure_log.txt in the folder.",
+                           "실측에 실패했습니다. 폴더의 web_ui_measure.log와 "
+                           "measure_log.txt를 보세요."),
+    "th_select": ("Select", "선택"),
+    "export_note": ("Check rows to save only those rows.",
+                    "저장할 행에 체크하세요. 체크한 행만 저장됩니다."),
+    "export_format": ("Format", "형식"),
+    "fmt_csv": ("CSV (Excel, Google Sheets)",
+                "CSV (엑셀, 구글 시트 모두 가능)"),
+    "fmt_xlsx": ("Excel (.xlsx)", "엑셀 (.xlsx)"),
+    "select_all": ("Select all", "전체 선택"),
+    "deselect_all": ("Deselect all", "전체 해제"),
+    "save_table": ("Save table", "테이블 저장"),
+    "err_export_empty": ("Select at least one row to save.",
+                         "저장할 행을 하나 이상 선택하세요."),
+    "err_export_nomatch": ("No matching table in this folder.",
+                           "이 폴더에 매칭표가 없습니다."),
+    "err_export_format": ("Unknown format.",
+                          "알 수 없는 형식입니다."),
     "matching_none": ("No matching table in this result (older run). "
                       "Solids, validity, volume, and bbox are in "
                       "report.txt.",
@@ -839,7 +871,8 @@ def error_page(message, lang="en"):
 def parse_multipart(body, boundary):
     """Minimal multipart/form-data parser (stdlib only).
 
-    Returns (fields, files): fields maps name -> str, files maps
+    Returns (fields, files): fields maps name -> str, or a list of
+    str when a field name repeats (checkbox groups); files maps
     name -> (original_filename, bytes). Raises ValueError on bad input.
     """
     delimiter = b"--" + boundary
@@ -877,7 +910,15 @@ def parse_multipart(body, boundary):
         if filename:
             files[name] = (filename, content)
         else:
-            fields[name] = content.decode("utf-8", errors="replace")
+            value = content.decode("utf-8", errors="replace")
+            if name in fields:
+                prev = fields[name]
+                if isinstance(prev, list):
+                    prev.append(value)
+                else:
+                    fields[name] = [prev, value]
+            else:
+                fields[name] = value
     return fields, files
 
 
@@ -1163,6 +1204,108 @@ def viewer_html(output_dir, lang="en"):
       <script src="/viewer3d.js?{js_query}"></script>"""
 
 
+def _xml_escape(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def build_xlsx(headers, rows_values):
+    """Build a minimal .xlsx workbook (stdlib only: zipfile + XML).
+
+    No openpyxl dependency: the web UI must run on a plain Python.
+    Cells use inline strings (no sharedStrings table); numbers stay
+    numeric so the sheet can compute on them. Returns bytes.
+    """
+    import io
+    import zipfile
+
+    def col_letter(i):
+        s = ""
+        i += 1
+        while i:
+            i, r = divmod(i - 1, 26)
+            s = chr(65 + r) + s
+        return s
+
+    widths = [8, 42, 14, 14, 14, 16]
+    cols_xml = "".join(
+        f"<col min=\"{i + 1}\" max=\"{i + 1}\" width=\"{widths[i] if i < len(widths) else 14}\" customWidth=\"1\"/>"
+        for i in range(len(headers)))
+    sheet_rows = []
+    header_cells = "".join(
+        f"<c r=\"{col_letter(i)}1\" s=\"1\" t=\"inlineStr\"><is><t>"
+        f"{_xml_escape(h)}</t></is></c>"
+        for i, h in enumerate(headers))
+    sheet_rows.append(f"<row r=\"1\">{header_cells}</row>")
+    for ri, row in enumerate(rows_values, start=2):
+        cells = []
+        for ci, v in enumerate(row):
+            ref = f"{col_letter(ci)}{ri}"
+            if v is None or v == "":
+                cells.append(f"<c r=\"{ref}\"/>")
+            elif isinstance(v, bool):
+                cells.append(f"<c r=\"{ref}\" t=\"b\"><v>"
+                             f"{1 if v else 0}</v></c>")
+            elif isinstance(v, (int, float)):
+                cells.append(f"<c r=\"{ref}\"><v>{v!r}</v></c>")
+            else:
+                cells.append(f"<c r=\"{ref}\" t=\"inlineStr\"><is><t>"
+                             f"{_xml_escape(v)}</t></is></c>")
+        sheet_rows.append(f"<row r=\"{ri}\">{''.join(cells)}</row>")
+    sheet_xml = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+        f"<cols>{cols_xml}</cols><sheetData>{''.join(sheet_rows)}</sheetData>"
+        "</worksheet>")
+    workbook_xml = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+        "<sheets><sheet name=\"Matching\" sheetId=\"1\" r:id=\"rId1\"/></sheets>"
+        "</workbook>")
+    content_types = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+        "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+        "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+        "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
+        "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+        "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
+        "</Types>")
+    rels = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+        "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>"
+        "</Relationships>")
+    workbook_rels = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+        "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>"
+        "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>"
+        "</Relationships>")
+    styles = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+        "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+        "<fonts><font><sz val=\"11\"/><name val=\"Calibri\"/></font>"
+        "<font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>"
+        "<fills><fill><patternFill patternType=\"none\"/></fill></fills>"
+        "<borders><border/></borders>"
+        "<cellStyleXfs><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
+        "<cellXfs><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
+        "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/></cellXfs>"
+        "<cellStyles><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
+        "</styleSheet>")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        zf.writestr("xl/styles.xml", styles)
+    return buf.getvalue()
+
+
 def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
     # tabbed cards for input images, 3D previews, files/downloads, QA logs.
@@ -1304,9 +1447,14 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
         except Exception:
             matching_rows = []
     matching_table = ""
+    # The measured column appears only after a measurement run
+    # (a row with a non-None measured value); older results render
+    # exactly as before.
+    show_measured = any(row.get("measured") is not None
+                        for row in matching_rows)
     if matching_rows:
         tr_rows = ""
-        for row in matching_rows:
+        for ri, row in enumerate(matching_rows):
             res = row.get("result", "-")
             cls = {"O": "status-ok", "X": "status-err"}.get(
                 res, "status-warn")
@@ -1318,16 +1466,33 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
                 if isinstance(v, float):
                     return f"{v:.2f}"
                 return html.escape(str(v))
+            measured_cell = ""
+            if show_measured:
+                mval = row.get("measured")
+                method = row.get("measured_method") or ""
+                if mval is None:
+                    measured_cell = "<td>—</td>"
+                else:
+                    measured_cell = (
+                        f"<td title=\"{html.escape(str(method))}\">"
+                        f"{_fmt(mval)}</td>")
             tr_rows += (
-                f"<tr><td>{html.escape(str(row.get('no', '—')))}</td>"
+                f"<tr><td><input type=\"checkbox\" class=\"rowcheck\" "
+                f"name=\"rows\" value=\"{ri}\" checked></td>"
+                f"<td>{html.escape(str(row.get('no', '—')))}</td>"
                 f"<td>{html.escape(str(row.get('item', '')))}</td>"
                 f"<td>{_fmt(row.get('drawing'))}</td>"
                 f"<td>{_fmt(row.get('modeling'))}</td>"
+                f"{measured_cell}"
                 f"<td><span class=\"{cls}\">{html.escape(str(res))}</span></td></tr>")
+        measured_th = (f"<th>{tr(lang, 'th_measured')}</th>"
+                       if show_measured else "")
         matching_table = (
-            f"<table class=\"files\"><tr><th>{tr(lang, 'th_no')}</th>"
+            f"<table class=\"files\"><tr><th>{tr(lang, 'th_select')}</th>"
+            f"<th>{tr(lang, 'th_no')}</th>"
             f"<th>{tr(lang, 'th_item')}</th><th>{tr(lang, 'th_drawing')}</th>"
-            f"<th>{tr(lang, 'th_modeling')}</th><th>{tr(lang, 'th_result')}</th></tr>"
+            f"<th>{tr(lang, 'th_modeling')}</th>{measured_th}"
+            f"<th>{tr(lang, 'th_result')}</th></tr>"
             f"{tr_rows}</table>")
     else:
         matching_table = f"<p class=\"note\">{tr(lang, 'matching_none')}</p>"
@@ -1343,6 +1508,64 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
         numbered_img = (
             f"<div class=\"card\"><p class=\"note\">"
             f"{tr(lang, 'matching_no_numbered')}</p></div>")
+
+    # Table-export form: wraps the table (checkboxes live inside
+    # it) and saves only the checked rows as CSV or .xlsx.
+    # Sibling of the measure form below, never nested in it:
+    # nested <form> tags are invalid HTML and browsers drop the
+    # inner form (the Oct 30 rerun bug).
+    export_open = ""
+    export_close = ""
+    if matching_rows:
+        export_open = (
+            f"<form action=\"/export\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"dir\" value=\"{html.escape(str(output_dir))}\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">")
+        export_close = (
+            f"<p class=\"note\">{tr(lang, 'export_note')}</p>"
+            f"<p><label>{tr(lang, 'export_format')} "
+            f"<select name=\"format\">"
+            f"<option value=\"csv\">{tr(lang, 'fmt_csv')}</option>"
+            f"<option value=\"xlsx\">{tr(lang, 'fmt_xlsx')}</option>"
+            f"</select></label> "
+            f"<button type=\"button\" onclick=\"document.querySelectorAll"
+            f"('.rowcheck').forEach(c=>c.checked=true);return false;\">"
+            f"{tr(lang, 'select_all')}</button> "
+            f"<button type=\"button\" onclick=\"document.querySelectorAll"
+            f"('.rowcheck').forEach(c=>c.checked=false);return false;\">"
+            f"{tr(lang, 'deselect_all')}</button> "
+            f"<button class=\"btn\" type=\"submit\">"
+            f"{tr(lang, 'save_table')}</button></p></form>")
+
+    # Real-measurement (실측) form: runs measure_step.py on this
+    # folder's model.step and adds a Measured column to the table.
+    # No API call, no rebuild. Only shown when a STEP exists.
+    measure_block = ""
+    step_path = output_dir / "model.step"
+    if step_path.is_file():
+        done_note = ""
+        measurements_path = output_dir / "measurements.json"
+        if measurements_path.is_file():
+            try:
+                _m = json.loads(measurements_path.read_text(
+                    encoding="utf-8"))
+                _at = _m.get("measured_at", "")
+                done_note = (f"<p class=\"note\">{tr(lang, 'measure_done')}"
+                             f"{' (' + _at + ')' if _at else ''}</p>")
+            except Exception:
+                done_note = f"<p class=\"note\">{tr(lang, 'measure_done')}</p>"
+        measure_block = (
+            f"<form action=\"/measure\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"dir\" value=\"{html.escape(str(output_dir))}\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<label>freecadcmd <input type=\"text\" name=\"freecadcmd\" "
+            f"value=\"freecadcmd\"></label> "
+            f"<button class=\"btn\" type=\"submit\">"
+            f"{tr(lang, 'measure_btn')}</button></form>"
+            f"<p class=\"note\">{tr(lang, 'measure_note')}</p>"
+            f"{done_note}")
 
     file_rows = ""
     if output_dir.is_dir():
@@ -1398,7 +1621,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       {numbered_img}
       <div class="card"><h3>&#10003; {tr(lang, 'matching_title')}</h3>
       <p class="note">{tr(lang, 'matching_note')}</p>
-      {matching_table}
+      {export_open}{matching_table}{export_close}
+      {measure_block}
       <p class="note">{tr(lang, 'matching_legend')}</p>
       <p class="note">{tr(lang, 'matching_disclaimer')}</p></div>
     </div>
@@ -1593,7 +1817,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export"):
             self.send_error(404, "Not found")
             return
         try:
@@ -1616,6 +1840,139 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         lang = pick_lang(fields.get("lang", ""))
+        if parsed.path == "/measure":
+            # Real measurement: no API call, no rebuild. Runs
+            # run_pipeline.py --measure on the folder's model.step,
+            # then shows the result page with the Measured column.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            if not (output_dir / "model.step").is_file():
+                data = error_page(tr(lang, "err_measure_nostep"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--measure",
+                       "--output-dir", str(output_dir),
+                       "--freecadcmd", freecadcmd_value]
+            log_path = output_dir / "web_ui_measure.log"
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_measure_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/export":
+            # Save only the checked matching-table rows as CSV or
+            # .xlsx. CSV is UTF-8 with BOM so Excel on Windows
+            # reads Korean correctly; it also uploads directly to
+            # Google Sheets. .xlsx is built stdlib-only (no
+            # openpyxl dependency). Numbers stay numeric so the
+            # sheet can compute on them; empty means no value.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            matching_path = output_dir / "matching.json"
+            if not matching_path.is_file():
+                data = error_page(tr(lang, "err_export_nomatch"), lang=lang)
+                self._send_html(400, data)
+                return
+            try:
+                all_rows = json.loads(matching_path.read_text(
+                    encoding="utf-8"))
+            except Exception:
+                all_rows = []
+            raw_sel = fields.get("rows", [])
+            if isinstance(raw_sel, str):
+                raw_sel = [raw_sel]
+            try:
+                idxs = sorted({int(x) for x in raw_sel})
+            except ValueError:
+                idxs = []
+            selected = [all_rows[i] for i in idxs
+                        if 0 <= i < len(all_rows)]
+            if not selected:
+                data = error_page(tr(lang, "err_export_empty"), lang=lang)
+                self._send_html(400, data)
+                return
+            fmt = fields.get("format", "csv")
+            if isinstance(fmt, list):
+                fmt = fmt[0] if fmt else "csv"
+            if fmt not in ("csv", "xlsx"):
+                data = error_page(tr(lang, "err_export_format"), lang=lang)
+                self._send_html(400, data)
+                return
+            show_measured = any(r.get("measured") is not None
+                                for r in selected)
+            headers = [tr(lang, "th_no"),
+                       tr(lang, "th_item"), tr(lang, "th_drawing"),
+                       tr(lang, "th_modeling")]
+            if show_measured:
+                headers.append(tr(lang, "th_measured"))
+            headers.append(tr(lang, "th_result"))
+
+            def _cell(v):
+                if v is None:
+                    return ""
+                if isinstance(v, bool):
+                    return "True" if v else "False"
+                return v
+
+            body_rows = []
+            for r in selected:
+                vals = [r.get("no", ""), r.get("item", ""),
+                        _cell(r.get("drawing")),
+                        _cell(r.get("modeling"))]
+                if show_measured:
+                    vals.append(_cell(r.get("measured")))
+                vals.append(r.get("result", ""))
+                body_rows.append(vals)
+            safe_name = "".join(c for c in output_dir.name
+                                if c.isalnum() or c in ("-", "_", "."))
+            filename = f"matching_{safe_name or 'result'}.{fmt}"
+            if fmt == "csv":
+                import csv
+                import io
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(headers)
+                writer.writerows(body_rows)
+                payload = buf.getvalue().encode("utf-8-sig")
+                ctype = "text/csv; charset=utf-8"
+            else:
+                payload = build_xlsx(headers, body_rows)
+                ctype = ("application/vnd.openxmlformats-officedocument"
+                         ".spreadsheetml.sheet")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Disposition",
+                             f"attachment; filename=\"{filename}\"")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         qa_trail = ""
         if parsed.path == "/answer":
             # Translate the answer form into a /run-equivalent
