@@ -2334,10 +2334,39 @@ def run_remap_mode(output_dir, freecadcmd, model, max_tokens, dry_run):
     for name, feat in by_name.items():
         cons = [(c.get("name"), c.get("value"))
                 for c in (feat.get("constraints") or [])]
+        # The pre-fix prompt listed ONLY length/size/sketch/
+        # constraints, although the dump also carries the data most
+        # dimensions actually are: created-face cylinder diameters
+        # and feature extents, plus sketch circle diameters. With
+        # only Length to go on, an honest LLM maps exactly one row
+        # (D1 = Pad_Body length 7.0) and leaves the rest out "do
+        # not guess" -- the Oct 31, 2026 home remap returned 1/13
+        # for exactly this reason. Give it the full per-feature
+        # numbers so diameter/extent rows can be mapped at all.
+        faces = feat.get("created_faces") or []
+        cyl_diams = sorted({round(2 * fc["radius"], 4)
+                            for fc in faces
+                            if fc.get("radius") is not None})
+        ext = {}
+        for ax in ("x", "y", "z"):
+            vals = []
+            for fc in faces:
+                bb = fc.get("bbox") or {}
+                rng = bb.get(ax)
+                if rng and len(rng) == 2:
+                    vals += [rng[0], rng[1]]
+            if vals:
+                ext[ax.upper()] = round(max(vals) - min(vals), 4)
+        geom = feat.get("geometry") or []
+        circ_diams = sorted({round(2 * g["radius"], 4)
+                             for g in geom
+                             if g.get("type") == "Circle"
+                             and g.get("radius") is not None})
         feat_lines.append(
             f"- {name}: length={feat.get('length')} "
             f"size={feat.get('size')} sketch={feat.get('sketch')} "
-            f"constraints={cons}")
+            f"constraints={cons} cyl_diams={cyl_diams} "
+            f"extent={ext} sketch_circle_diams={circ_diams}")
     prompt = (
         "Write ONLY one python code fence containing exactly this "
         "assignment (no other text, no bare dict):\n"

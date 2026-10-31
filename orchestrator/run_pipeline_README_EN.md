@@ -261,3 +261,18 @@ modeling-based Result.
   extract_feature_map_from_response() strips fences first and
   accepts both a FEATURE_MAP = {...} assignment and a bare
   {...} dict literal.
+
+## Remap prompt information fix
+- The Oct 31, 2026 home remap filled only 1/13 because the
+  remap prompt listed only Length/Size per feature, omitting
+  the cylinder diameters, feature extents, and sketch circle
+  diameters that the dump actually carries. An honest LLM then
+  mapped only the one provable row (D1 = Pad_Body length 7.0)
+  and left the rest out under "do not guess". The prompt now
+  includes cyl_diams, extent (X/Y/Z sizes), and
+  sketch_circle_diams per feature. For this folder the
+  expected fills are D1, D2 (bore 7.93), D5/D6 (1.5), D7 (flat
+  extent Z 21), D8 (step 16), D10 (boss 10), D11 (body 22);
+  D3 (recess diameter 12, ambiguous inside its feature),
+  D4 (18 misread), D9 (chamfer count 4, not a size), and
+  D12/D13 (notes) correctly stay ?.
