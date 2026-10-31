@@ -1446,6 +1446,17 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    # Windows trap (Oct 30, 2026, real home failure): Windows Python
+    # defaults redirected stdout to cp1252, so ANY non-ASCII print
+    # (the "Measurement (실측)" summary) raises UnicodeEncodeError
+    # and kills the run AFTER the work is done. Force UTF-8 here so
+    # no print can crash on language again; web_ui additionally
+    # sets PYTHONUTF8=1 for its subprocesses.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = parse_args(argv)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

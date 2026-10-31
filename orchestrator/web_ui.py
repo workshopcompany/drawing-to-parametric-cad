@@ -1867,10 +1867,12 @@ class Handler(BaseHTTPRequestHandler):
                        "--output-dir", str(output_dir),
                        "--freecadcmd", freecadcmd_value]
             log_path = output_dir / "web_ui_measure.log"
+            measure_env = dict(os.environ)
+            measure_env["PYTHONUTF8"] = "1"
             with open(log_path, "w", encoding="utf-8") as log_file:
                 result = subprocess.run(
                     command, stdout=log_file, stderr=subprocess.STDOUT,
-                    timeout=3600)
+                    timeout=3600, env=measure_env)
             if result.returncode != 0:
                 data = error_page(tr(lang, "err_measure_failed"), lang=lang)
                 self._send_html(400, data)
@@ -2153,6 +2155,11 @@ class Handler(BaseHTTPRequestHandler):
         # Empty field: the inherited key is popped so run_pipeline.py
         # falls back to a local .env file (if one exists).
         env = dict(os.environ)
+        # Windows trap: without this, a redirected child stdout
+        # defaults to cp1252 and any non-ASCII print crashes the
+        # run (Oct 30, 2026 home 실측 failure). run_pipeline.py
+        # also reconfigures its own stdout to UTF-8.
+        env["PYTHONUTF8"] = "1"
         if api_key:
             env["META_API_KEY"] = api_key
         else:
