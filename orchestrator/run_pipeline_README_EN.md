@@ -178,3 +178,19 @@ mesh points exist near almost any value and would "confirm"
 anything. Files: measurements.json (+ measured_at), measure_log.txt,
 matching.json gains measured/measured_method per D-row, and a
 summary line is appended to report.txt.
+Note: --measure also refreshes the Modeling and Result columns with
+the current matching rules when the folder still holds macro.py
+(the macro that built the model). Old result folders carry stale
+modeling values from the whole-bbox mapping (widths -> size Y,
+heights -> size Z), which showed X even where the measured value is
+nearly exact; after a re-measure those rows become O or ? under the
+current rules. Folders without macro.py keep their old rows, and a
+failed verification never downgrades good rows to ?.
+The --measure run also writes a measured verdict per D-row
+(measured_result): O if the measured value is within general
+tolerance ±0.1 of the drawing value, X if it differs more, ?
+if there is no measurement. It is deliberately NOT the strict
+0.01 table tolerance: accepted outline deviations (peak height
+1.739 vs 1.70) would otherwise show X. The web UI shows it as a
+"Measured result" column next to Measured, separate from the
+modeling-based Result.

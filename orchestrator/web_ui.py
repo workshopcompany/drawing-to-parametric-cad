@@ -277,6 +277,7 @@ S = {
                             "\u201c의도한 대로 만들었나\u201d를 보는 거지, "
                             "\u201c도면 진값과 같나\u201d를 증명이 아님."),
     "th_measured": ("Measured", "실측값"),
+    "th_meas_result": ("Measured result", "실측 판정"),
     "measure_btn": ("Measure", "실측"),
     "measure_note": ("Measure real geometry from the STEP and add a "
                      "Measured column next to Modeling value. The measured "
@@ -1467,6 +1468,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
                     return f"{v:.2f}"
                 return html.escape(str(v))
             measured_cell = ""
+            meas_result_cell = ""
             if show_measured:
                 mval = row.get("measured")
                 method = row.get("measured_method") or ""
@@ -1476,6 +1478,16 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
                     measured_cell = (
                         f"<td title=\"{html.escape(str(method))}\">"
                         f"{_fmt(mval)}</td>")
+                _no = str(row.get("no", ""))
+                if not (_no.startswith("D") and _no[1:].isdigit()):
+                    meas_result_cell = "<td>—</td>"
+                else:
+                    mres = row.get("measured_result") or "?"
+                    mcls = {"O": "status-ok", "X": "status-err"}.get(
+                        mres, "status-warn")
+                    meas_result_cell = (
+                        f"<td><span class=\"{mcls}\">"
+                        f"{html.escape(str(mres))}</span></td>")
             tr_rows += (
                 f"<tr><td><input type=\"checkbox\" class=\"rowcheck\" "
                 f"name=\"rows\" value=\"{ri}\" checked></td>"
@@ -1483,15 +1495,18 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
                 f"<td>{html.escape(str(row.get('item', '')))}</td>"
                 f"<td>{_fmt(row.get('drawing'))}</td>"
                 f"<td>{_fmt(row.get('modeling'))}</td>"
-                f"{measured_cell}"
+                f"{measured_cell}{meas_result_cell}"
                 f"<td><span class=\"{cls}\">{html.escape(str(res))}</span></td></tr>")
         measured_th = (f"<th>{tr(lang, 'th_measured')}</th>"
                        if show_measured else "")
+        meas_result_th = (f"<th>{tr(lang, 'th_meas_result')}</th>"
+                          if show_measured else "")
         matching_table = (
             f"<table class=\"files\"><tr><th>{tr(lang, 'th_select')}</th>"
             f"<th>{tr(lang, 'th_no')}</th>"
             f"<th>{tr(lang, 'th_item')}</th><th>{tr(lang, 'th_drawing')}</th>"
             f"<th>{tr(lang, 'th_modeling')}</th>{measured_th}"
+            f"{meas_result_th}"
             f"<th>{tr(lang, 'th_result')}</th></tr>"
             f"{tr_rows}</table>")
     else:
@@ -1933,6 +1948,7 @@ class Handler(BaseHTTPRequestHandler):
                        tr(lang, "th_modeling")]
             if show_measured:
                 headers.append(tr(lang, "th_measured"))
+                headers.append(tr(lang, "th_meas_result"))
             headers.append(tr(lang, "th_result"))
 
             def _cell(v):
@@ -1949,6 +1965,11 @@ class Handler(BaseHTTPRequestHandler):
                         _cell(r.get("modeling"))]
                 if show_measured:
                     vals.append(_cell(r.get("measured")))
+                    _no = str(r.get("no", ""))
+                    if _no.startswith("D") and _no[1:].isdigit():
+                        vals.append(r.get("measured_result") or "?")
+                    else:
+                        vals.append("")
                 vals.append(r.get("result", ""))
                 body_rows.append(vals)
             safe_name = "".join(c for c in output_dir.name

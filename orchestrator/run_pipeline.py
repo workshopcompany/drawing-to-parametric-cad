@@ -1266,6 +1266,51 @@ def run_measure_mode(output_dir, freecadcmd):
             rows = json.loads(matching_path.read_text(encoding="utf-8"))
         except Exception:
             rows = []
+    # Refresh modeling/result with the CURRENT matching rules when
+    # the folder still holds the macro that built the model. Old
+    # result folders carry stale modeling values (whole-bbox
+    # mapping: widths -> size Y, heights -> size Z), which is why
+    # their Result column shows X even though the measured column
+    # is nearly exact. The D-list is rebuilt from the stored rows
+    # themselves (label/value/view/reference), so no dimensions.json
+    # is needed; folders without macro.py keep their old rows, and
+    # a failed verification never downgrades good rows to ?.
+    macro_path = output_dir / "macro.py"
+    d_old = [r for r in rows
+             if re.match(r"D\d+$", str(r.get("no", "")))]
+    if macro_path.is_file() and d_old:
+        try:
+            verification = verify_step(freecadcmd, step_path, output_dir)
+            macro_text = macro_path.read_text(encoding="utf-8",
+                                              errors="replace")
+            d_lines = []
+            for r in d_old:
+                item = str(r.get("item", ""))
+                view = r.get("view")
+                if not view:
+                    vm = re.search(r"\[(front|section|side|top)\]\s*$",
+                                   item)
+                    view = vm.group(1) if vm else None
+                label = re.sub(r"\s*\[(front|section|side|top)\]\s*$",
+                               "", item)
+                val = r.get("drawing")
+                if val is None:
+                    continue
+                val_txt = (f"({val})"
+                           if r.get("result") == "? (참조치수)"
+                           else f"{val}")
+                view_txt = f" [{view}]" if view else ""
+                d_lines.append(f"{r.get('no')}: {label} = {val_txt} mm"
+                               f"{view_txt}")
+            new_rows = build_matching(verification, macro_text,
+                                      "\n".join(d_lines))
+            if verification.get("ok") and new_rows:
+                rows = new_rows
+                print(f"MEASURE NOTE: modeling column refreshed with "
+                      f"current rules ({len(new_rows)} rows)")
+        except Exception as exc:
+            print(f"MEASURE NOTE: modeling refresh skipped ({exc}); "
+                  f"keeping existing rows")
     measured_count = 0
     d_count = 0
     for row in rows:
@@ -1284,11 +1329,24 @@ def run_measure_mode(output_dir, freecadcmd):
         if value is None:
             row["measured"] = None
             row["measured_method"] = None
+            row["measured_result"] = None
             continue
         measured, method = match_measured(label, float(value), view,
                                           measurements)
         row["measured"] = measured
         row["measured_method"] = method
+        # Separate verdict for the measured value, next to the
+        # modeling-based Result: general tolerance ±0.1 (NOT the
+        # strict 0.01 table tolerance, which would flag accepted
+        # outline deviations like peak height 1.739 vs 1.70).
+        # No measurement -> ? (cannot judge); non-D rows keep no
+        # measured_result field at all.
+        if measured is None:
+            row["measured_result"] = "?"
+        elif abs(measured - float(value)) <= 0.1 + 1e-9:
+            row["measured_result"] = "O"
+        else:
+            row["measured_result"] = "X"
         if measured is not None:
             measured_count += 1
     matching_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False),

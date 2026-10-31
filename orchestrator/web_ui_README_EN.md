@@ -260,3 +260,11 @@ key.
   so you can compute on them; empty means no value. The exported
   columns are No, Item, Drawing, Modeling, Measured (when present),
   Result.
+
+The matching table has two verdicts once measured: Result
+(modeling-based: was it built as intended, strict 0.01 mm) and
+Measured result (measured-based: is the real geometry right,
+general tolerance ±0.1 mm), shown next to Measured. A row can
+therefore show Result X with Measured result O: the modeling
+mapping was wrong for that row, but the real geometry matches.
+Rows without a measurement show ? in the measured verdict.
