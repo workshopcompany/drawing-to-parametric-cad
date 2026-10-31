@@ -1385,6 +1385,79 @@ def _always_rows(verification):
     return rows
 
 
+def _feature_candidate_values(feat, by_name):
+    """All modeling values one solid feature can supply, for the
+    value-uniqueness inference fallback (step 3 of the modeling
+    order). Sources: Length, Size, created-face cylinder diameters,
+    created-face extents per axis, and its sketch's circle
+    diameters. Sketches are merged into their solid feature, never
+    counted as a separate feature, so a sketch circle and the
+    solid's cylinder of the same size do not create a false
+    ambiguity."""
+    vals = []
+    if feat.get("length") is not None:
+        vals.append((float(feat["length"]), "Length"))
+    if feat.get("size") is not None:
+        vals.append((float(feat["size"]), "Size"))
+    faces = feat.get("created_faces") or []
+    for fc in faces:
+        if fc.get("radius") is not None:
+            vals.append((round(2 * fc["radius"], 4),
+                         "cylinder diameter"))
+    for ax in ("x", "y", "z"):
+        rngs = [fc["bbox"][ax] for fc in faces
+                if fc.get("bbox") and fc["bbox"].get(ax)]
+        if rngs:
+            vals.append((round(max(v[1] for v in rngs)
+                               - min(v[0] for v in rngs), 4),
+                         f"extent {ax.upper()}"))
+    sk_name = feat.get("sketch")
+    if isinstance(sk_name, str):
+        sk = by_name.get(sk_name)
+        if sk:
+            for g in sk.get("geometry") or []:
+                if g.get("type") == "Circle" \
+                        and g.get("radius") is not None:
+                    vals.append((round(2 * g["radius"], 4),
+                                 "sketch circle diameter"))
+    return vals
+
+
+def infer_unique_modeling_value(d_value, features):
+    """Step 3 (inference) of the modeling order, deterministic.
+
+    Returns (value, method) when EXACTLY ONE solid feature in the
+    .fcstd dump has a candidate value within MATCH_TOL of the
+    drawing value, else (None, None). One hit per feature: a
+    feature that supplies the value several ways still counts
+    once. Ambiguous values (1.5 in both Pad_Boss and
+    Pocket_Recess; 7.93 in Pocket_Bore and the tap pockets) stay
+    blank -- those are what the Q&A step (step 2) must resolve
+    by feature name, because value alone cannot tell them apart
+    and a value-picked row could hide a wrong feature (a boss
+    built 2.0 with a recess at 1.5 would otherwise read O).
+    The method string is labelled "inferred", never "anchored".
+    """
+    by_name = _features_by_name(features)
+    hits = []
+    for name, feat in by_name.items():
+        if feat.get("type") == "Sketcher::SketchObject":
+            continue
+        if not feat.get("created_faces") \
+                and feat.get("length") is None \
+                and feat.get("size") is None:
+            continue
+        for v, src in _feature_candidate_values(feat, by_name):
+            if abs(v - d_value) <= MATCH_TOL:
+                hits.append((name, v, src))
+                break
+    if len(hits) == 1:
+        name, v, src = hits[0]
+        return v, (f"inferred: {name} {src} "
+                   f"(unique value match)")
+    return None, None
+
+
 def build_matching(verification, macro_text, user_text, mapping=None,
                    features=None):
     """Build the drawing-vs-modeling table rows.
@@ -1430,13 +1503,42 @@ def build_matching(verification, macro_text, user_text, mapping=None,
                              "view": d.get("view")})
                 continue
             entry = mapping.get(d["id"])
+            _is_note_row = ("NOTE" in d["label"].upper()
+                            or "TOLERANCE" in d["label"].upper()
+                            or "GENERAL CHAMFER" in d["label"].upper())
+            if entry is None and _is_note_row:
+                rows.append({"no": d["id"], "item": item,
+                             "drawing": d["value"], "modeling": None,
+                             "result": "?", "view": d.get("view"),
+                             "modeling_method": "NOTE row (rule, not geometry)"})
+                continue
             if entry is None:
+                # Step 3 (inference): anchored is absent, so a
+                # unique value match may fill the row, labelled.
+                iv, im = infer_unique_modeling_value(d["value"],
+                                                     features)
+                if iv is not None:
+                    row = _match_row(d["id"], item, d["value"], iv)
+                    row["view"] = d.get("view")
+                    row["modeling_method"] = im
+                    rows.append(row)
+                    continue
                 rows.append({"no": d["id"], "item": item,
                              "drawing": d["value"], "modeling": None,
                              "result": "?", "view": d.get("view"),
                              "modeling_method": "no FEATURE_MAP entry"})
                 continue
             value, method = resolve_mapping_value(d["id"], entry, by_name)
+            if value is None and not _is_note_row:
+                # Anchored entry exists but does not resolve
+                # (e.g. a multi-diameter feature): inference may
+                # still fill it when the value is unique across
+                # features. An anchored X is never overridden --
+                # inference only runs when anchored gives nothing.
+                iv, im = infer_unique_modeling_value(d["value"],
+                                                     features)
+                if iv is not None:
+                    value, method = iv, im
             row = _match_row(d["id"], item, d["value"], value)
             row["view"] = d.get("view")
             row["modeling_method"] = method
@@ -2176,10 +2278,19 @@ def run_measure_mode(output_dir, freecadcmd):
                   f"keeping existing rows")
     # Anchored measurement when the folder carries a mapping (new
     # builds): each D-row is measured on its mapped feature's STEP
-    # faces only. Without a mapping (old folders) the battery
-    # fallback runs, exactly as before. A mapping WITHOUT readable
-    # features/STEP faces gives ? rows, never a silent battery
-    # fallback: the gap must stay visible.
+    # faces only. Per-row fallback (Oct 31, 2026): a partial map
+    # must NOT disable measurement for its unmapped rows -- the
+    # old folder-level rule (mapping present => every unmapped row
+    # gets ?) made a 1-entry remap map WORSE than no map at all
+    # for the measured column. So an unmapped row, or a row whose
+    # anchored measurement returns nothing, falls back to the
+    # battery for the MEASURED column only, with its method
+    # labelled "battery fallback" (never silent, never anchored).
+    # The MODELING column keeps its ? -- only the measured value
+    # is allowed to fall back, because a measured value is a STEP
+    # fact with a visible method, while a modeling value claims a
+    # feature link that does not exist. NOTE rows (tolerance /
+    # general chamfer) never fall back: they are rules, not sizes.
     mapping_data = None
     mapping_present = False
     mapping_file = output_dir / "mapping.json"
@@ -2231,6 +2342,14 @@ def run_measure_mode(output_dir, freecadcmd):
             else:
                 measured, method = measure_anchored(
                     no, entry, anchored_by_name, anchored, anchored_faces)
+            if measured is None and "NOTE" not in label.upper():
+                # Per-row measured fallback (see comment above):
+                # only the measured column, explicitly labelled.
+                _fb, _fb_method = match_measured(
+                    label, float(value), view, measurements)
+                if _fb is not None:
+                    measured, method = (
+                        _fb, f"battery fallback: {_fb_method}")
         else:
             measured, method = match_measured(label, float(value), view,
                                               measurements)
@@ -2384,6 +2503,30 @@ def run_remap_mode(output_dir, freecadcmd, model, max_tokens, dry_run):
         "leave it out -- do not guess.\n\n"
         "Dimensions:\n" + "\n".join(d_lines) + "\n\n"
         "Features in .fcstd:\n" + "\n".join(feat_lines) + "\n")
+    # Step 2 (Q&A matching): the folder's Q&A history, verbatim,
+    # in whatever language the answers were written (Korean,
+    # English, or both mixed). No keyword dictionary is used --
+    # the LLM reads both languages and bridges them to the
+    # English feature names above, which is what resolves
+    # ambiguous rows value alone cannot (two 1.5 features: boss
+    # vs recess; several features sharing 7.93 or 22). Entries
+    # still go through resolve_mapping_value validation below,
+    # so a Q&A reading that does not resolve is dropped, never
+    # kept as a guess.
+    qa_path = output_dir / "qa_history.txt"
+    if qa_path.is_file():
+        try:
+            qa_text = qa_path.read_text(encoding="utf-8",
+                                        errors="replace")
+        except OSError:
+            qa_text = ""
+        if qa_text.strip():
+            prompt += ("\nQ&A history (user-confirmed answers; "
+                       "use these to resolve ambiguous rows -- "
+                       "they name which feature a dimension "
+                       "belongs to, even when two features share "
+                       "the same value):\n"
+                       + qa_text[:12000] + "\n")
     (output_dir / "remap_prompt.txt").write_text(prompt, encoding="utf-8")
     if dry_run:
         _log("REMAP DRY-RUN: prompt written to remap_prompt.txt, "

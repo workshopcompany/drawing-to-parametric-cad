@@ -276,3 +276,49 @@ modeling-based Result.
   D3 (recess diameter 12, ambiguous inside its feature),
   D4 (18 misread), D9 (chamfer count 4, not a size), and
   D12/D13 (notes) correctly stay ?.
+
+## Measured fallback (modeling stays ?, measured only from battery)
+- Oct 31, 2026 problem: a partial map (D1 only) blocked
+  measurement for every other row, because measurement was
+  folder-level: map present => all anchored, unmapped rows => ?.
+  A partial map thus made measurement worse than no map at all.
+- Measurement is now per-row. Mapped rows stay anchored;
+  unmapped rows, or rows whose anchored measurement returns
+  nothing, fill ONLY the measured column from the battery, with
+  the method labelled "battery fallback:". The modeling column
+  stays ? (a modeling value claims a feature link that does
+  not exist). NOTE rows (tolerance / general chamfer) never
+  fall back.
+- Verified on the 233655 copy: measured 1/13 -> 11/13, modeling
+  unchanged. D4 measures 16 X (no 18 cylinder) and D7 measures
+  22 X (no 21 cylinder), so fallback does not turn wrong values
+  into O; a fallback method that does not fit the row (e.g.
+  D9 via a vertex delta) stays visible on hover and must be
+  checked there.
+
+## Modeling order (anchored -> Q&A -> inference -> blank, Oct 31, 2026)
+- Modeling and measured columns have different sources:
+  modeling comes from the .fcstd, measured from the STEP. One
+  column never borrows the other's value.
+- Modeling order: (1) FEATURE_MAP anchored -- the builder's
+  declared link, first. (2) Q&A matching -- the remap prompt
+  now includes qa_history.txt verbatim, so the LLM reads
+  Korean, English, or mixed answers and bridges them to the
+  English feature names. No keyword dictionary is used; every
+  returned entry still passes resolve_mapping_value validation.
+  (3) Value-uniqueness inference -- only when exactly one
+  feature has a candidate value within 0.01 of the drawing
+  value, labelled "inferred:". Values shared by two or more
+  features (1.5 boss/recess, 7.93 bore/taps, 22 body/chamfer)
+  stay blank. An anchored X is never overridden by inference.
+  (4) Otherwise blank ?. NOTE/tolerance/general-chamfer rows
+  are rules, not geometry, and are never inferred.
+- Measured order: (1) anchored measurement, (2) battery
+  fallback ("battery fallback:"), (3) blank ?.
+- Verified on the 233655 copy (map with D1 only): inference
+  alone fills only D3 (12, Pocket_Recess cylinder unique);
+  D2/D5/D6/D7/D8/D10/D11 stay ? on value sharing/ambiguity
+  and need Q&A remap by feature name. An earlier test bug
+  where inference filled NOTE rows by coincidence (D12 1.0 =
+  Pad_Step length, D13 2.0 = Pocket_Flat length) is blocked
+  by the NOTE-row inference ban.
