@@ -1495,8 +1495,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
                 f"<td>{html.escape(str(row.get('item', '')))}</td>"
                 f"<td>{_fmt(row.get('drawing'))}</td>"
                 f"<td>{_fmt(row.get('modeling'))}</td>"
-                f"{measured_cell}{meas_result_cell}"
-                f"<td><span class=\"{cls}\">{html.escape(str(res))}</span></td></tr>")
+                f"<td><span class=\"{cls}\">{html.escape(str(res))}</span></td>"
+                f"{measured_cell}{meas_result_cell}</tr>")
         measured_th = (f"<th>{tr(lang, 'th_measured')}</th>"
                        if show_measured else "")
         meas_result_th = (f"<th>{tr(lang, 'th_meas_result')}</th>"
@@ -1505,9 +1505,9 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
             f"<table class=\"files\"><tr><th>{tr(lang, 'th_select')}</th>"
             f"<th>{tr(lang, 'th_no')}</th>"
             f"<th>{tr(lang, 'th_item')}</th><th>{tr(lang, 'th_drawing')}</th>"
-            f"<th>{tr(lang, 'th_modeling')}</th>{measured_th}"
-            f"{meas_result_th}"
-            f"<th>{tr(lang, 'th_result')}</th></tr>"
+            f"<th>{tr(lang, 'th_modeling')}</th>"
+            f"<th>{tr(lang, 'th_result')}</th>{measured_th}"
+            f"{meas_result_th}</tr>"
             f"{tr_rows}</table>")
     else:
         matching_table = f"<p class=\"note\">{tr(lang, 'matching_none')}</p>"
@@ -1945,11 +1945,11 @@ class Handler(BaseHTTPRequestHandler):
                                 for r in selected)
             headers = [tr(lang, "th_no"),
                        tr(lang, "th_item"), tr(lang, "th_drawing"),
-                       tr(lang, "th_modeling")]
+                       tr(lang, "th_modeling"),
+                       tr(lang, "th_result")]
             if show_measured:
                 headers.append(tr(lang, "th_measured"))
                 headers.append(tr(lang, "th_meas_result"))
-            headers.append(tr(lang, "th_result"))
 
             def _cell(v):
                 if v is None:
@@ -1962,7 +1962,8 @@ class Handler(BaseHTTPRequestHandler):
             for r in selected:
                 vals = [r.get("no", ""), r.get("item", ""),
                         _cell(r.get("drawing")),
-                        _cell(r.get("modeling"))]
+                        _cell(r.get("modeling")),
+                        r.get("result", "")]
                 if show_measured:
                     vals.append(_cell(r.get("measured")))
                     _no = str(r.get("no", ""))
@@ -1970,7 +1971,6 @@ class Handler(BaseHTTPRequestHandler):
                         vals.append(r.get("measured_result") or "?")
                     else:
                         vals.append("")
-                vals.append(r.get("result", ""))
                 body_rows.append(vals)
             safe_name = "".join(c for c in output_dir.name
                                 if c.isalnum() or c in ("-", "_", "."))
