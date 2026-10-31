@@ -251,3 +251,13 @@ modeling-based Result.
   against the dump, saved to mapping.json, matching.json
   rebuilt. The model, macro, and report are never changed;
   unvalidated entries are dropped with reasons in remap_log.txt.
+
+## Remap fence bug fix
+- The Oct 31, 2026 home remap failure: the remap prompt told
+  the LLM to answer in a code fence, but the extractor ran
+  ast.parse() on the fenced text, so it always failed with
+  "macro does not parse" -- the LLM followed the instruction
+  exactly and the extractor rejected it.
+  extract_feature_map_from_response() strips fences first and
+  accepts both a FEATURE_MAP = {...} assignment and a bare
+  {...} dict literal.

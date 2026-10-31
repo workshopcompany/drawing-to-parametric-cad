@@ -419,6 +419,43 @@ def extract_feature_map(macro_text):
     return {}, "FEATURE_MAP: not present in macro"
 
 
+def extract_feature_map_from_response(content):
+    """Extract FEATURE_MAP from a raw LLM response (remap only).
+
+    BUG (Oct 31, 2026 home remap failure): the remap prompt tells
+    the LLM to answer in a code fence, but extract_feature_map()
+    runs ast.parse() on the whole text, so a fenced answer fails
+    with "macro does not parse" and the remap always fails -- the
+    LLM followed the instruction exactly and the extractor
+    rejected it. This helper strips fences first, then accepts
+    either a FEATURE_MAP = {...} assignment or a bare {...} dict
+    literal, both validated the same way afterwards.
+    """
+    text = content or ""
+    fences = re.findall(r"```[^\n]*\n(.*?)```", text, re.DOTALL)
+    if fences:
+        text = fences[0]
+    mapping, warn = extract_feature_map(text)
+    if mapping:
+        return mapping, None
+    if warn == "FEATURE_MAP: macro does not parse":
+        # A prose/no-map answer is not a parse problem, it is just
+        # missing -- say so, so remap_log.txt does not mislead.
+        warn = "FEATURE_MAP: not present in response"
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            value = ast.literal_eval(stripped)
+        except (ValueError, SyntaxError):
+            value = None
+        if isinstance(value, dict):
+            entries = {str(k): v for k, v in value.items()
+                       if isinstance(v, dict)}
+            if entries:
+                return entries, None
+    return {}, warn
+
+
 def looks_like_question(content):
     """Heuristic for a design-question response instead of code.
 
@@ -2302,7 +2339,10 @@ def run_remap_mode(output_dir, freecadcmd, model, max_tokens, dry_run):
             f"size={feat.get('size')} sketch={feat.get('sketch')} "
             f"constraints={cons}")
     prompt = (
-        "Write ONLY a FEATURE_MAP dict literal in a python code fence.\n"
+        "Write ONLY one python code fence containing exactly this "
+        "assignment (no other text, no bare dict):\n"
+        "FEATURE_MAP = {\"D<n>\": {\"feature\": \"<name>\", "
+        "\"kind\": \"<kind>\", ...}, ...}\n"
         "Map EVERY D-number below to the feature in the .fcstd dump "
         "that creates that dimension. Use feature names EXACTLY as "
         "listed; do not invent features, sketches, or constraint "
@@ -2342,7 +2382,7 @@ def run_remap_mode(output_dir, freecadcmd, model, max_tokens, dry_run):
     (output_dir / "remap_raw_response.txt").write_text(
         json.dumps(response_json, indent=2, ensure_ascii=False),
         encoding="utf-8")
-    candidate, warn = extract_feature_map(content)
+    candidate, warn = extract_feature_map_from_response(content)
     if warn:
         _log(f"REMAP FAIL: {warn}")
         (output_dir / "remap_log.txt").write_text(
