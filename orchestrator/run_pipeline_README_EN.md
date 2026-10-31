@@ -81,13 +81,20 @@ solids == 1 and valid True, and the result is "RESULT: MODELING
 COMPLETE". It does NOT mean "same as the drawing". The matching
 table goes to matching.json and as lines in report.txt. Drawing
 values are the LLM's reading from the drawing (macro parameters,
-ask-first D-dimensions, confirmed answers); modeling values are
-measured from STEP (bbox sizes, cylinder diameters, solids,
-validity, volume). O = within 0.01 mm, X = differs, ? = cannot be
-mapped automatically, ~ = reference only. Axis mapping follows
-the principles (axial = X, diameters = cylinder faces). In the
-ask-first step, the D-dimension list goes to dimensions.json, and
-if positions exist, red numbered badges are drawn into
+ask-first D-dimensions, confirmed answers). Modeling values resolve
+per row, in order: (1) a macro parameter whose name shares a word
+with the dimension (slot width, tip height, ...), (2) STEP cylinder
+faces for diameters/radii (only if a cylinder near that size exists),
+(3) whole-part size X for total/overall/axial lengths. Width/height
+words are NOT compared to whole-part bbox sizes: they are
+view-dependent and often local, so without a matching macro parameter
+they show ? instead of a bogus X. Reference dimensions (parenthesized
+on the drawing) show "? (참조치수)". D-dimensions carry a view tag
+([front]/[section]/[side]/[top]) from ask-first through /answer to
+the table. O = within 0.01 mm, X = differs, ? = cannot be compared
+this way, ? (참조치수) = reference dimension, ~ = reference only.
+In the ask-first step, the D-dimension list goes to dimensions.json,
+and if positions exist, red numbered badges are drawn into
 drawing_numbered.png (skipped if PIL is missing or no positions;
 positions are estimates).
 

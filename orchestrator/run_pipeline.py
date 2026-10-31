@@ -104,7 +104,14 @@ ASK_FIRST_INSTRUCTION = (
     "the drawing image as fractions 0-1, origin top-left (for "
     "example, D1: outer diameter = 22 mm @ (0.75, 0.20)). These "
     "positions are estimates for numbering badges on the drawing; "
-    "if you cannot place a dimension, omit its @ (x, y) part."
+    "if you cannot place a dimension, omit its @ (x, y) part. "
+    "After the position, add the view in square brackets: [front] "
+    "for the front view, [section] for a section view, [side] for "
+    "the side view, [top] for the top view (for example, D1: outer "
+    "diameter = 22 mm @ (0.75, 0.20) [front]). Omit the bracket if "
+    "you cannot tell the view. Reference dimensions (shown in "
+    "parentheses on the drawing) keep their parentheses around the "
+    "value, for example D2: lower reference = (1.97) mm @ (0.20, 0.80)."
 )
 
 # Safety: patterns rejected in a generated macro. The orchestrator itself
@@ -710,13 +717,30 @@ def select_retry_categories(diagnosis, attempt):
 # The table therefore checks build-vs-intent (did FreeCAD actually
 # build what the macro said?), plus the user-confirmed Q&A values
 # when they are present in --text. Tolerance: 0.01 mm.
+# Matching rules (Oct 30, 2026): D-rows resolve via macro parameter
+# (shared name token) first, then cylinder faces for dia/radius,
+# then size X for total lengths only. Width/height words are never
+# compared to whole-part bbox sizes (view-dependent, often local);
+# without a macro parameter they show ?, never a bogus X. Reference
+# dimensions show "? (참조치수)". D-lines may carry a [view] tag
+# (front/section/side/top), stored in dimensions.json and shown in
+# the table; view-aware measurement is future work, not bbox logic.
 MATCH_TOL = 0.01
 
 
-def _closest(values, target):
+def _near_cyl(values, target):
+    """Closest cylinder diameter, or None if no cylinder is near
+    this size at all. A far-away 'closest' is not the same feature
+    that differs: a 1.60 cylinder is not a 2.80 'diameter' that is
+    wrong, it is simply no such cylinder, so it must be ? (not X).
+    Threshold: within 25% of the target counts as the same feature.
+    """
     if not values:
         return None
-    return min(values, key=lambda v: abs(v - target))
+    c = min(values, key=lambda v: abs(v - target))
+    if abs(c - target) > 0.25 * target:
+        return None
+    return c
 
 
 def _match_row(no, item, drawing, modeling, tol=MATCH_TOL):
@@ -754,20 +778,63 @@ def _keyword_target(name):
     return None
 
 
-def _target_modeling(kind, verification):
-    if kind == "radius":
-        c = _closest(verification.get("cyl_diams", []), 0)
-        # radius rows are converted to diameter before calling here
-        return None
-    if kind == "dia":
-        return None  # handled by caller (needs the expected value)
-    if kind == "length":
-        return verification.get("size_x")
-    if kind == "width":
-        return verification.get("size_y")
-    if kind == "height":
-        return verification.get("size_z")
+def _dim_tokens(text):
+    """Split a dimension label or parameter name into tokens."""
+    parts = re.split(r"[^A-Za-z0-9]+", (text or "").upper())
+    stop = {"THE", "OF", "A", "AN", "AND", "FOR", "AT", "ON", "TO", "BY"}
+    return {p for p in parts if len(p) >= 2 and p not in stop}
+
+
+# Words too generic to identify a feature by themselves: "left" is
+# shared by an offset and a tip height, "height" by a section height
+# and a base height. A shared generic word plus a DIFFERENT value
+# is not a match at all (that bug matched offsets to tip heights).
+_GENERIC_TOKENS = {"WIDTH", "HEIGHT", "LENGTH", "DEPTH", "THICK",
+                   "SIZE", "DIA", "DIAMETER", "RADIUS", "TOP", "BOTTOM",
+                   "UPPER", "LOWER", "LEFT", "RIGHT", "FRONT", "BACK",
+                   "SIDE", "SECTION", "PART", "OVERALL", "TOTAL",
+                   "FIRST", "SECOND", "MIDDLE", "CENTER", "CENTRE",
+                   "VIEW"}
+
+
+def _find_macro_param(label, value, macro_params):
+    """Find the macro parameter most likely to be this dimension.
+
+    Returns (name, param_value) or None, in two tiers:
+    - Strong: a shared SPECIFIC token (e.g. SLOT, TIP, CROWN).
+      The parameter IS the feature, so a differing value is an
+      honest X (found, wrong size). Closest strong value wins.
+    - Weak: only generic tokens shared, but the value agrees within
+      tolerance. Treated as the same feature (O); a generic word
+      plus a different value is never evidence, so weak matches
+      can only produce O, never X.
+    A coincidental equal value with no shared token never matches.
+    """
+    lt = _dim_tokens(label)
+    strong = lt - _GENERIC_TOKENS
+    best_strong = None
+    best_weak = None
+    for name, pvalue in macro_params:
+        nt = _dim_tokens(name)
+        diff = abs(pvalue - value)
+        if strong & nt:
+            if best_strong is None or diff < best_strong[2]:
+                best_strong = (name, pvalue, diff)
+        elif (lt & nt) and diff <= MATCH_TOL + 1e-9:
+            if best_weak is None or diff < best_weak[2]:
+                best_weak = (name, pvalue, diff)
+    if best_strong is not None:
+        return best_strong[:2]
+    if best_weak is not None:
+        return best_weak[:2]
     return None
+
+
+def _is_reference_dim(d):
+    if d.get("reference"):
+        return True
+    label = d.get("label", "")
+    return "REFERENCE" in label.upper() or "참조" in label
 
 
 def parse_macro_dimensions(macro_text):
@@ -792,11 +859,21 @@ def parse_macro_dimensions(macro_text):
     return list(seen.items())
 
 
+_VIEW_ALIASES = {"FRONT": "front", "SECTION": "section", "SIDE": "side",
+                 "TOP": "top", "정면": "front", "단면": "section",
+                 "측면": "side", "평면": "top"}
+
+
 def parse_numbered_dimensions(text):
-    """Parse ask-first / answer D-lines: D1: label = value @ (x, y).
+    """Parse ask-first / answer D-lines:
+    D1: label = value mm @ (x, y) [view].
 
     Position (x, y) is a 0-1 image fraction, origin top-left, and is
-    APPROXIMATE (LLM vision estimate). Returns a list of dicts.
+    APPROXIMATE (LLM vision estimate). The [view] tag (front /
+    section / side / top) is optional; old lines without it still
+    parse with view None. A value in parentheses, e.g. = (1.97) mm,
+    is a reference dimension (non-driving) and sets reference True.
+    Returns a list of dicts.
     """
     dims = []
     for line in text.splitlines():
@@ -804,6 +881,13 @@ def parse_numbered_dimensions(text):
         if not m:
             continue
         rest = m.group(2).strip()
+        view = None
+        vm_view = re.search(
+            r"\[\s*(front|section|side|top|정면|단면|측면|평면)\s*\]",
+            rest, re.IGNORECASE)
+        if vm_view:
+            view = _VIEW_ALIASES.get(vm_view.group(1).upper(),
+                                     vm_view.group(1).lower())
         pos = None
         pm = re.search(r"@\s*\(\s*([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)\s*\)", rest)
         if pm:
@@ -819,10 +903,17 @@ def parse_numbered_dimensions(text):
             value = float(vm.group(1))
         except ValueError:
             continue
-        label = rest[:vm.start()].strip(" =:") or f"D{m.group(1)}"
+        reference = vm.start() > 0 and rest[vm.start() - 1] == "("
+        label = rest[:vm.start()].strip()
+        if label.endswith("("):
+            label = label[:-1].strip()
+        label = label.strip(" =:") or f"D{m.group(1)}"
+        if "REFERENCE" in label.upper() or "참조" in label:
+            reference = True
         dims.append({"id": f"D{m.group(1)}", "label": label,
                      "value": value, "x": pos[0] if pos else None,
-                     "y": pos[1] if pos else None})
+                     "y": pos[1] if pos else None,
+                     "view": view, "reference": reference})
     # Dedupe by id, first wins.
     out, seen_ids = [], set()
     for d in dims:
@@ -882,27 +973,59 @@ def build_matching(verification, macro_text, user_text):
     Row order: D-dimensions (ask-first / answer text) first, then
     macro parameters not already covered, then always-present rows
     (solids, valid, bbox sizes, cylinder diameters, volume).
+
+    Resolution order per D-row (first hit wins):
+    1. Reference dimension -> "? (참조치수)" (non-driving, never X).
+    2. Macro parameter, two tiers (see _find_macro_param): a shared
+       specific word makes it the feature (O/X by tolerance); a
+       shared generic word plus an agreeing value makes it O only.
+    3. Diameter/radius -> STEP cylinder faces, but only if a
+       cylinder near that size exists at all (else ?).
+    4. Total/overall/axial length -> whole-part size X.
+    5. Anything else -> ?. Width/height words are deliberately NOT
+       compared to whole-part bbox sizes: they are view-dependent
+       and often local (a tip height, a slot width), and comparing
+       them to a bbox size produced the bogus-X table. A row whose
+       comparison is itself invalid shows ?, never X.
     """
     rows = []
     used_macro = set()
+    macro_params = parse_macro_dimensions(macro_text)
     # D-dimensions from --text (ask-first list carried via /answer,
     # or user notes written in D1: form).
     d_dims = parse_numbered_dimensions(user_text or "")
     for d in d_dims:
+        item = d["label"]
+        if d.get("view"):
+            item = f"{item} [{d['view']}]"
+        if _is_reference_dim(d):
+            rows.append({"no": d["id"], "item": item,
+                         "drawing": d["value"], "modeling": None,
+                         "result": "? (참조치수)"})
+            continue
+        pm = _find_macro_param(d["label"], d["value"], macro_params)
+        if pm is not None:
+            used_macro.add(pm[0])
+            rows.append(_match_row(d["id"], item, d["value"], pm[1]))
+            continue
         kind = _keyword_target(d["label"])
         modeling = None
         if kind == "dia":
-            modeling = _closest(verification.get("cyl_diams", []), d["value"])
+            modeling = _near_cyl(verification.get("cyl_diams", []),
+                                 d["value"])
         elif kind == "radius":
-            modeling = _closest(verification.get("cyl_diams", []),
-                                d["value"] * 2)
-            if modeling is not None:
-                modeling = modeling / 2
-        elif kind in ("length", "width", "height"):
-            modeling = _target_modeling(kind, verification)
-        rows.append(_match_row(d["id"], d["label"], d["value"], modeling))
+            c = _near_cyl(verification.get("cyl_diams", []),
+                          d["value"] * 2)
+            modeling = (c / 2) if c is not None else None
+        elif kind == "length":
+            u = d["label"].upper()
+            if "TOTAL" in u or "OVERALL" in u or "AXIAL" in u:
+                modeling = verification.get("size_x")
+        rows.append(_match_row(d["id"], item, d["value"], modeling))
     # Macro parameters.
-    for name, value in parse_macro_dimensions(macro_text):
+    for name, value in macro_params:
+        if name in used_macro:
+            continue
         kind = _keyword_target(name)
         if kind is None:
             continue
@@ -915,18 +1038,20 @@ def build_matching(verification, macro_text, user_text):
         if covered:
             continue
         modeling = None
-        drawing = value
         if kind == "dia":
-            modeling = _closest(verification.get("cyl_diams", []), value)
+            modeling = _near_cyl(verification.get("cyl_diams", []), value)
         elif kind == "radius":
-            c = _closest(verification.get("cyl_diams", []), value * 2)
+            c = _near_cyl(verification.get("cyl_diams", []), value * 2)
             modeling = (c / 2) if c is not None else None
-            drawing = value
-        elif kind in ("length", "width", "height"):
-            modeling = _target_modeling(kind, verification)
-        if modeling is None and kind not in ("dia", "radius"):
+        elif kind == "length":
+            u = name.upper()
+            if "TOTAL" in u or "OVERALL" in u or "AXIAL" in u:
+                modeling = verification.get("size_x")
+            else:
+                continue  # local length: not bbox-comparable
+        else:  # width/height: view-dependent/local, not bbox-comparable
             continue
-        rows.append(_match_row("—", name, drawing, modeling))
+        rows.append(_match_row("—", name, value, modeling))
     # Always-present rows.
     rows.append(_match_row("—", "Solids (count)", 1, verification.get("solids")))
     rows.append(_match_row("—", "Valid solid", True, verification.get("valid")))

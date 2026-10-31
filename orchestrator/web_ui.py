@@ -263,9 +263,11 @@ S = {
     "th_modeling": ("Modeling value", "모델링값"),
     "th_result": ("Result", "결과"),
     "matching_legend": ("O = within 0.01 mm, X = differs, "
-                       "? = cannot be mapped automatically, "
+                       "? = cannot be compared this way, "
+                       "? (참조치수) = reference dimension (not driving), "
                        "~ = reference only.",
-                       "O는 0.01mm 이내, X는 다름, ?는 자동 매핑 불가, "
+                       "O는 0.01mm 이내, X는 다름, ?는 이런 방식으로는 비교 불가, "
+                       "? (참조치수)는 참조치수(구동치수 아님), "
                        "~는 참고용."),
     "matching_disclaimer": ("Drawing value is the value read by the LLM, "
                             "or an answer you confirmed. This checks "
@@ -1666,9 +1668,13 @@ class Handler(BaseHTTPRequestHandler):
                         _pos = ""
                         if _d.get("x") is not None and _d.get("y") is not None:
                             _pos = f" @ ({_d['x']}, {_d['y']})"
+                        _view = f" [{_d['view']}]" if _d.get("view") else ""
+                        _val = _d.get('value', '')
+                        if _d.get("reference"):
+                            _val = f"({_val})"
                         _lines.append(
                             f"{_d.get('id', 'D?')}: {_d.get('label', '')} = "
-                            f"{_d.get('value', '')} mm{_pos}")
+                            f"{_val} mm{_pos}{_view}")
                     prev_dims_text = "\n".join(_lines)
                 except Exception:
                     prev_dims_text = ""
