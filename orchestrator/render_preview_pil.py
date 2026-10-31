@@ -86,6 +86,25 @@ def render_view(verts, facets, cam, up, size=(900, 675)):
     dr = ImageDraw.Draw(img)
     for _d, (p1, p2, p3), col in items:
         dr.polygon([p1, p2, p3], fill=col)
+    # XYZ axes triad (corner, fixed length, so directions can be
+    # talked about against the image: X red, Y green, Z blue).
+    try:
+        import math
+        ox, oy, ln = 80, H - 80, 55
+        for axis, col_ax, label in (
+                ((1, 0, 0), (200, 30, 30), "X"),
+                ((0, 1, 0), (30, 150, 30), "Y"),
+                ((0, 0, 1), (30, 60, 220), "Z")):
+            ax = np.array(axis, dtype=float)
+            dx = float(ax @ right)
+            dy = -float(ax @ up2)
+            n = math.hypot(dx, dy) or 1.0
+            ex, ey = ox + dx / n * ln, oy + dy / n * ln
+            dr.line([(ox, oy), (ex, ey)], fill=col_ax, width=3)
+            dr.ellipse([ex - 4, ey - 4, ex + 4, ey + 4], fill=col_ax)
+            dr.text((ex + 6, ey - 8), label, fill=col_ax)
+    except Exception:
+        pass
     return img, len(items)
 
 

@@ -71,6 +71,28 @@ def render(tris, cam, up, out_path):
                           facecolors=[it[2] for it in items],
                           edgecolors="none", linewidths=0)
     ax.add_collection(coll)
+    # XYZ axes triad (corner, fixed length in axes coords): X red,
+    # Y green, Z blue. Project each world axis onto (right, up2)
+    # and normalize, so a view never hides an axis.
+    try:
+        import math
+        for axis, col_ax, label in (
+                ((1, 0, 0), "red", "X"),
+                ((0, 1, 0), "green", "Y"),
+                ((0, 0, 1), "blue", "Z")):
+            axv = np.array(axis, dtype=float)
+            dx = float(np.dot(axv, right))
+            dy = float(np.dot(axv, up2))
+            n = math.hypot(dx, dy) or 1.0
+            # Corner in data coords: use axes fraction via annotate.
+            ax.annotate("", xy=(0.12 + dx / n * 0.08, 0.12 + dy / n * 0.08),
+                        xytext=(0.12, 0.12), xycoords="axes fraction",
+                        arrowprops=dict(arrowstyle="->", color=col_ax, lw=2))
+            ax.text(0.12 + dx / n * 0.09, 0.12 + dy / n * 0.09, label,
+                    color=col_ax, fontsize=12, fontweight="bold",
+                    transform=ax.transAxes)
+    except Exception:
+        pass
     ax.autoscale_view()
     ax.set_aspect("equal")
     ax.axis("off")

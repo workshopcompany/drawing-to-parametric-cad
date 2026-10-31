@@ -63,6 +63,27 @@
         if(j) ctx.lineTo(sx,sy); else ctx.moveTo(sx,sy); }
       ctx.closePath(); ctx.fill();
     }
+    // XYZ axes triad (corner, rotates with the model): X red, Y green, Z blue.
+    try {
+      var ox=60, oy=H-60, ln=45;
+      var axes=[[[1,0,0],'#e03030','X'],[[0,1,0],'#2a9a2a','Y'],[[0,0,1],'#3050e0','Z']];
+      for(var ai=0; ai<axes.length; ai++){
+        var av=axes[ai][0];
+        // Same yaw/pitch rotation as rot(), but on the axis vector
+        // alone (rot() subtracts the model centre, which would
+        // corrupt a direction vector).
+        var x1=av[0]*Math.cos(yaw)-av[1]*Math.sin(yaw);
+        var y1=av[0]*Math.sin(yaw)+av[1]*Math.cos(yaw);
+        var y2=y1*Math.cos(pitch)-av[2]*Math.sin(pitch);
+        var dx=x1, dy=-y2;
+        var nn=Math.sqrt(dx*dx+dy*dy)||1;
+        var ex=ox+dx/nn*ln, ey=oy+dy/nn*ln;
+        ctx.strokeStyle=axes[ai][1]; ctx.lineWidth=3;
+        ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(ex,ey); ctx.stroke();
+        ctx.fillStyle=axes[ai][1]; ctx.font='bold 16px sans-serif';
+        ctx.fillText(axes[ai][2], ex+6, ey+5);
+      }
+    } catch(e) {}
     setBar('drag rotate - wheel zoom - '+F.length+' tris - yaw '+yaw.toFixed(2)+' pitch '+pitch.toFixed(2));
   }
   canvas.addEventListener('mousedown',function(e){dragging=true;lx=e.clientX;ly=e.clientY;});

@@ -375,8 +375,51 @@ S = {
                       "입력 도면 / 윤곽 (브라우저 보기)"),
     "input_none": ("No input images.", "입력 이미지가 없습니다."),
     "preview_caption": ("Shaded preview from STEP tessellation — "
-                        "for shape checking",
-                        "STEP 테셀레이션 음영 프리뷰 — 형상 확인용"),
+                        "for shape checking. XYZ triad at the corner: "
+                        "X red, Y green, Z blue.",
+                        "STEP 테셀레이션 음영 프리뷰 — 형상 확인용. 모서리 "
+                        "XYZ 축: X 빨강, Y 초록, Z 파랑."),
+    "images_btn": ("Extract images again", "이미지 다시 추출"),
+    "images_note": ("Re-render preview images from the CURRENT "
+                    "model.step (with XYZ triad), without rebuilding "
+                    "the model. Use it after a patch, so the images "
+                    "are fresh instead of stale.",
+                    "현재 model.step에서 프리뷰 이미지를 다시 만듭니다 "
+                    "(XYZ 축 포함). 모델을 다시 만들지 않습니다. 패치 "
+                    "뒤에 눌러야 이미지가 최신이 됩니다."),
+    "images_none": ("No model.step in this folder to render from.",
+                    "이 폴더에 렌더할 model.step이 없습니다."),
+    "err_images_failed": ("Image extraction failed. See "
+                          "web_ui_images.log and images_log.txt in "
+                          "the folder.",
+                          "이미지 추출에 실패했습니다. 폴더의 "
+                          "web_ui_images.log와 images_log.txt를 보세요."),
+    "tree_title": ("Feature tree (.fcstd)", "피처 트리 (.fcstd)"),
+    "tree_note": ("Features from features.json (the .fcstd dump). "
+                  "Flip direction patches ONLY that feature's "
+                  "Reversed value in macro.py (1 API call, 1 "
+                  "FreeCAD run, same folder); the previous macro "
+                  "is kept as macro.prev.py.",
+                  "features.json(.fcstd 정보)의 피처 목록입니다. 방향 "
+                  "뒤집기는 그 피처의 Reversed 값만 macro.py에서 "
+                  "고칩니다 (API 1번, FreeCAD 1번, 같은 폴더). 이전 "
+                  "매크로는 macro.prev.py로 남습니다."),
+    "tree_none": ("No features.json in this folder (older run). "
+                  "Build or patch once with the new code to get a "
+                  "tree, or use Remap to refresh the .fcstd dump.",
+                  "이 폴더에 features.json이 없습니다 (예전 실행). 새 "
+                  "코드로 한 번 만들거나 패치하면 트리가 생기고, "
+                  "매핑 다시 채우기로 .fcstd 정보를 새로고칠 수도 "
+                  "있습니다."),
+    "flip_btn": ("Flip direction", "방향 뒤집기"),
+    "err_flip_failed": ("Direction flip failed. See patch_log.txt "
+                        "in the folder. The macro was not partially "
+                        "changed.",
+                        "방향 뒤집기에 실패했습니다. 폴더의 "
+                        "patch_log.txt를 보세요. 매크로는 반만 "
+                        "바뀌지 않았습니다."),
+    "err_flip_nofeature": ("Pick a feature to flip.",
+                           "뒤집을 피처를 선택하세요."),
     "preview_none": ("No result previews (render failed — check "
                      ".fcstd / STEP in the file list above).",
                      "결과 프리뷰가 없습니다 (렌더 실패 — .fcstd / STEP 파일 "
@@ -1720,6 +1763,97 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
             f"<p class=\"note\">{tr(lang, 'measure_note')}</p>"
             f"{done_note}")
 
+    # Images block: re-render previews from the CURRENT model.step.
+    images_block = ""
+    if (output_dir / "model.step").is_file():
+        images_block = (
+            f"<form action=\"/images\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"dir\" value=\"{html.escape(str(output_dir))}\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<label>freecadcmd <input type=\"text\" name=\"freecadcmd\" "
+            f"value=\"freecadcmd\"></label> "
+            f"<button class=\"btn\" type=\"submit\">"
+            f"{tr(lang, 'images_btn')}</button></form>"
+            f"<p class=\"note\">{tr(lang, 'images_note')}</p>")
+    else:
+        images_block = f"<p class=\"note\">{tr(lang, 'images_none')}</p>"
+
+    # Feature tree card: features.json from the .fcstd dump, with
+    # a per-feature direction-flip button (patch, not rebuild).
+    tree_card = ""
+    features_path = output_dir / "features.json"
+    if features_path.is_file():
+        try:
+            _feat_data = json.loads(features_path.read_text(
+                encoding="utf-8"))
+            _feats = _feat_data.get("features", [])
+        except Exception:
+            _feats = []
+        _solid = []
+        for _f in _feats:
+            _t = str(_f.get("type", ""))
+            if "SketchObject" in _t or "Origin" in _t:
+                continue
+            if _t in ("PartDesign::Body", "App::Line", "App::Plane",
+                      "App::Point"):
+                continue
+            _solid.append(_f)
+        if _solid:
+            _rows = ""
+            for _f in _solid:
+                _name = str(_f.get("name", "?"))
+                _short = _t = str(_f.get("type", "")).split("::")[-1]
+                _len = _f.get("length")
+                _size = _f.get("size")
+                _dim = ""
+                if _len is not None:
+                    _dim = f"Length {_len}"
+                elif _size is not None:
+                    _dim = f"Size {_size}"
+                _rev = _f.get("reversed")
+                _rev_txt = ("True" if _rev is True else
+                            "False" if _rev is False else "?")
+                _sk = _f.get("sketch") or ""
+                _flip = ""
+                if "Pad" in _short or "Pocket" in _short:
+                    _flip = (
+                        f"<form action=\"/flip\" method=\"post\" "
+                        f"enctype=\"multipart/form-data\" "
+                        f"style=\"display:inline;\">"
+                        f"<input type=\"hidden\" name=\"dir\" value=\""
+                        f"{html.escape(str(output_dir))}\">"
+                        f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+                        f"<input type=\"hidden\" name=\"feature\" value=\""
+                        f"{html.escape(_name)}\">"
+                        f"<label>freecadcmd <input type=\"text\" "
+                        f"name=\"freecadcmd\" value=\"freecadcmd\" "
+                        f"size=\"12\"></label> "
+                        f"<label>Meta API key <input type=\"password\" "
+                        f"name=\"api_key\"></label> "
+                        f"<button class=\"btn\" type=\"submit\">"
+                        f"{tr(lang, 'flip_btn')}</button></form>")
+                _rows += (f"<tr><td>{html.escape(_name)}</td>"
+                          f"<td>{html.escape(_short)}</td>"
+                          f"<td>{html.escape(_dim)}</td>"
+                          f"<td>{html.escape(_sk)}</td>"
+                          f"<td>{html.escape(_rev_txt)}</td>"
+                          f"<td>{_flip}</td></tr>")
+            tree_card = (
+                f"<div class=\"card\"><h3>🌳 {tr(lang, 'tree_title')}</h3>"
+                f"<p class=\"note\">{tr(lang, 'tree_note')}</p>"
+                f"<table class=\"files\"><tr><th>Feature</th><th>Type</th>"
+                f"<th>Size</th><th>Sketch</th><th>Reversed</th>"
+                f"<th></th></tr>{_rows}</table></div>")
+        else:
+            tree_card = (f"<div class=\"card\"><h3>🌳 "
+                         f"{tr(lang, 'tree_title')}</h3>"
+                         f"<p class=\"note\">{tr(lang, 'tree_none')}</p></div>")
+    else:
+        tree_card = (f"<div class=\"card\"><h3>🌳 "
+                     f"{tr(lang, 'tree_title')}</h3>"
+                     f"<p class=\"note\">{tr(lang, 'tree_none')}</p></div>")
+
     file_rows = ""
     if output_dir.is_dir():
         for path in sorted(output_dir.iterdir()):
@@ -1765,6 +1899,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     <div class="tab-panel" id="r2">
       {t2_viewer}
       <div class="grid2">{t2_cards}</div>
+      <div class="card"><h3>🖼 {tr(lang, 'images_btn')}</h3>{images_block}</div>
+      {tree_card}
     </div>
     <div class="tab-panel" id="r3">
       <div class="card"><h3>🔧 {tr(lang, 'files_title')}</h3>
@@ -1973,7 +2109,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip"):
             self.send_error(404, "Not found")
             return
         try:
@@ -2031,6 +2167,112 @@ class Handler(BaseHTTPRequestHandler):
                     timeout=3600, env=measure_env)
             if result.returncode != 0:
                 data = error_page(tr(lang, "err_measure_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/images":
+            # Extract images: no API call, no rebuild. Runs
+            # run_pipeline.py --images on the folder's CURRENT
+            # model.step, then shows the result page with fresh
+            # preview images (XYZ triad included).
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            if not (output_dir / "model.step").is_file():
+                data = error_page(tr(lang, "err_measure_nostep"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--images",
+                       "--output-dir", str(output_dir),
+                       "--freecadcmd", freecadcmd_value]
+            log_path = output_dir / "web_ui_images.log"
+            images_env = dict(os.environ)
+            images_env["PYTHONUTF8"] = "1"
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=images_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_images_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/flip":
+            # Flip ONE feature's direction: patch mode only, no
+            # rebuild. Runs run_pipeline.py --patch with a
+            # flip-only instruction for the named .fcstd feature.
+            # The LLM finds that feature's newObject name in
+            # macro.py and flips its Reversed line; everything
+            # else must stay unchanged.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            feature = fields.get("feature", "").strip()
+            if not feature:
+                data = error_page(tr(lang, "err_flip_nofeature"), lang=lang)
+                self._send_html(400, data)
+                return
+            if not (output_dir / "macro.py").is_file():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            api_key = fields.get("api_key", "")
+            if not api_key and not dotenv_key_present():
+                data = error_page(tr(lang, "err_key"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            flip_text = (
+                f"Flip the direction of ONLY the feature named "
+                f"{feature} in the .fcstd (find its newObject "
+                f"call with that name in macro.py and flip its "
+                f"Reversed value True <-> False, one line only). "
+                f"Change NOTHING else: no other feature, no "
+                f"dimension, no order, no sketch.")
+            command = [sys.executable, str(RUN_PIPELINE), "--patch",
+                       "--output-dir", str(output_dir),
+                       "--freecadcmd", freecadcmd_value,
+                       "--text", flip_text]
+            log_path = output_dir / "web_ui_run.log"
+            flip_env = dict(os.environ)
+            flip_env["PYTHONUTF8"] = "1"
+            if api_key:
+                flip_env["META_API_KEY"] = api_key
+            else:
+                flip_env.pop("META_API_KEY", None)
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=flip_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_flip_failed"), lang=lang)
                 self._send_html(400, data)
                 return
             data = result_page(output_dir, 0, lang=lang)

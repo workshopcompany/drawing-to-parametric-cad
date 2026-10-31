@@ -3164,6 +3164,88 @@ def export_step_from_fcstd(freecadcmd, fcstd_path, step_path, output_dir):
     return step_path.is_file()
 
 
+def render_previews(output_dir):
+    """Render preview PNGs from tris.json (best-effort, never a gate).
+
+    Same chain as the full build used to inline: render_preview.py
+    (matplotlib) first, then render_preview_pil.py (Pillow+numpy).
+    Returns (ok, note). The renderers now draw an XYZ axes triad
+    in every preview (X red, Y green, Z blue) so directions in
+    questions and patches can be talked about against the image.
+    """
+    preview_iso = output_dir / "preview_iso.png"
+    preview_main = output_dir / "preview_main.png"
+    preview_front = output_dir / "preview_front.png"
+    preview_top = output_dir / "preview_top.png"
+    preview_side = output_dir / "preview_side.png"
+    tris_path = output_dir / "tris.json"
+    script_dir = Path(__file__).resolve().parent
+    render_scripts = [
+        script_dir / "render_preview.py",
+        script_dir / "render_preview_pil.py",
+    ]
+    note = ""
+    for render_script in render_scripts:
+        if not render_script.is_file():
+            continue
+        try:
+            preview_result = subprocess.run(
+                [sys.executable, str(render_script), str(tris_path),
+                 str(preview_iso), str(preview_main),
+                 str(preview_front), str(preview_top),
+                 str(preview_side)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=300, text=True)
+            if preview_iso.is_file() and preview_main.is_file():
+                return True, (f"{preview_iso}, {preview_main} "
+                              f"(via {render_script.name})")
+            note = (f"{render_script.name} exit "
+                    f"{preview_result.returncode}, output: "
+                    f"{preview_result.stdout[-300:]}")
+        except Exception as exc:
+            note = f"{render_script.name}: {exc}"
+    return False, note
+
+
+def run_images_mode(output_dir, freecadcmd):
+    """Re-render preview images from the CURRENT model, no rebuild.
+
+    Web "Extract images" button: requires model.step, runs
+    verify_step (rewrites tris.json from the current STEP), then
+    render_previews (with XYZ triad). The model, macro, and
+    report are never changed; only preview_*.png + tris.json +
+    images_log.txt are updated, so images after a patch are
+    fresh instead of stale. Returns 0 on rendered previews,
+    1 when no STEP or verification/rendering failed.
+    """
+    step_path = output_dir / "model.step"
+    log_lines = []
+
+    def _log(msg):
+        log_lines.append(msg)
+        print(msg)
+
+    def _finish(code):
+        (output_dir / "images_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return code
+
+    if not step_path.is_file():
+        _log("IMAGES FAIL: model.step missing in this folder.")
+        return _finish(1)
+    verification = verify_step(freecadcmd, step_path, output_dir)
+    _log(f"IMAGES: verification: {verification}")
+    if not verification.get("ok"):
+        _log("IMAGES FAIL: STEP verification snippet failed.")
+        return _finish(1)
+    ok, note = render_previews(output_dir)
+    if ok:
+        _log(f"IMAGES: previews rendered: {note}")
+        return _finish(0)
+    _log(f"IMAGES FAIL: previews unavailable ({note})")
+    return _finish(1)
+
+
 def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                    dry_run):
     """Patch the existing macro.py in place — no regeneration.
@@ -3388,6 +3470,19 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                  + ". Patch again with only those features changed; "
                  "no auto-retry is run in patch mode.")
             return _finish(1)
+    # Fresh previews + feature tree after a patch, best-effort:
+    # the result page must show the PATCHED model, not stale
+    # images/tree from before the patch.
+    try:
+        _pok, _pnote = render_previews(output_dir)
+        _log(f"PATCH: previews refreshed: {_pnote if _pok else 'unavailable'}")
+    except Exception as exc:
+        _log(f"PATCH: preview refresh failed (best-effort): {exc}")
+    try:
+        if run_read_features(freecadcmd, fcstd_path, output_dir) is not None:
+            _log("PATCH: features.json refreshed from patched .fcstd")
+    except Exception as exc:
+        _log(f"PATCH: features refresh failed (best-effort): {exc}")
     report_lines = [
         "Drawing-to-Parametric-CAD orchestrator v0.1",
         "PATCH MODE: existing macro.py patched in place, 1 API call, "
@@ -3475,6 +3570,14 @@ def parse_args(argv=None):
                         "and report.txt are never changed. Needs only "
                         "--output-dir (+ --freecadcmd); with --dry-run "
                         "it writes remap_prompt.txt and calls no API.")
+    parser.add_argument("--images", action="store_true",
+                        help="Re-render preview images from the CURRENT "
+                        "model.step in an existing folder (web "
+                        "\"Extract images\" button): verify_step "
+                        "rewrites tris.json, then preview PNGs are "
+                        "rendered with the XYZ triad. No API call, "
+                        "no model/macro/report change. Needs only "
+                        "--output-dir (+ --freecadcmd).")
     parser.add_argument("--patch", action="store_true",
                         help="Patch an existing result folder's macro.py "
                         "in place instead of regenerating it: one "
@@ -3517,8 +3620,10 @@ def main(argv=None):
     if args.patch:
         return run_patch_mode(output_dir, args.freecadcmd, args.model,
                               args.max_tokens, args.text, args.dry_run)
+    if args.images:
+        return run_images_mode(output_dir, args.freecadcmd)
     if not args.drawing:
-        die("--drawing is required unless --measure, --inspect, --remap, or --patch is given.")
+        die("--drawing is required unless --measure, --inspect, --remap, --patch, or --images is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():
@@ -3928,6 +4033,26 @@ def main(argv=None):
             last_error = f"freecadcmd exit {returncode}. Log tail:\n{tail}"
             append_log(self_fix_log, f"Attempt {attempt}: {last_error}")
             continue
+        # STEP fallback (Oct 31, 2026 item 4): a macro's in-macro
+        # check_gate() saves .fcstd on EVERY feature but STEP is
+        # exported only at the very end, so a gate raise before
+        # the end leaves fcstd present and step missing (182125
+        # attempt 4 exactly). That is a macro-abort, not a STEP
+        # export failure — and it got more common as gate raises
+        # were added to macros. Export STEP from the .fcstd here
+        # instead of failing the whole attempt for a missing
+        # export; verification and the volume gate below still
+        # decide pass/fail, so a partial model is never passed.
+        if fcstd_path.is_file() and not step_path.is_file():
+            append_log(self_fix_log,
+                       f"Attempt {attempt}: model.fcstd saved but "
+                       f"model.step missing; exporting STEP from "
+                       f"the .fcstd instead of failing.")
+            if export_step_from_fcstd(args.freecadcmd, fcstd_path,
+                                      step_path, output_dir):
+                append_log(self_fix_log,
+                           f"Attempt {attempt}: STEP fallback "
+                           f"export succeeded.")
         if not fcstd_path.is_file() or not step_path.is_file():
             last_error = (
                 "Run finished but output files are missing under output-dir: "
@@ -4005,44 +4130,12 @@ def main(argv=None):
         # Visual previews (best-effort, never a gate): shaded PNGs
         # from the STEP tessellation, shown in the web UI result page.
         # A missing matplotlib or a render failure must NOT fail the
-        # run — the .fcstd / STEP files are the result.
-        # Chain: render_preview.py (matplotlib) first, then
-        # render_preview_pil.py (Pillow+numpy, always present here).
-        preview_iso = output_dir / "preview_iso.png"
-        preview_main = output_dir / "preview_main.png"
-        preview_front = output_dir / "preview_front.png"
-        preview_top = output_dir / "preview_top.png"
-        preview_side = output_dir / "preview_side.png"
-        tris_path = output_dir / "tris.json"
-        render_scripts = [
-            Path(__file__).resolve().parent / "render_preview.py",
-            Path(__file__).resolve().parent / "render_preview_pil.py",
-        ]
-        preview_ok = False
-        preview_note = ""
-        for render_script in render_scripts:
-            if not render_script.is_file():
-                continue
-            try:
-                preview_result = subprocess.run(
-                    [sys.executable, str(render_script), str(tris_path),
-                     str(preview_iso), str(preview_main),
-                     str(preview_front), str(preview_top),
-                     str(preview_side)],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    timeout=300, text=True)
-                if preview_iso.is_file() and preview_main.is_file():
-                    report_lines.append(
-                        f"Previews: {preview_iso}, {preview_main} "
-                        f"(via {render_script.name})")
-                    preview_ok = True
-                    break
-                preview_note = (
-                    f"{render_script.name} exit {preview_result.returncode}, "
-                    f"output: {preview_result.stdout[-300:]}")
-            except Exception as exc:
-                preview_note = f"{render_script.name}: {exc}"
-        if not preview_ok:
+        # run — the .fcstd / STEP files are the result. Same helper
+        # as --images, so previews always carry the XYZ triad.
+        preview_ok, preview_note = render_previews(output_dir)
+        if preview_ok:
+            report_lines.append(f"Previews: {preview_note}")
+        else:
             report_lines.append(f"Previews: unavailable ({preview_note})")
         # Drawing-vs-modeling matching table (matching.json + report
         # lines). Drawing values are the LLM's reading from the

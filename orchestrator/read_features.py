@@ -219,6 +219,15 @@ def main():
                 rec[prop.lower()] = float(getattr(obj, prop))
             except Exception:
                 pass
+        # Direction: Pad/Pocket Reversed flag, when the feature has
+        # one. This is what the web tree's "flip direction" button
+        # shows and what a patch flips; older features.json dumps
+        # (before this field) show "?" for it in the tree.
+        try:
+            if hasattr(obj, "Reversed"):
+                rec["reversed"] = bool(obj.Reversed)
+        except Exception:
+            pass
         if obj.TypeId == "PartDesign::InvoluteGear":
             try:
                 rec["teeth"] = int(obj.NumberOfTeeth)
