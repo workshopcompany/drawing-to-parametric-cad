@@ -106,7 +106,17 @@ MACRO_INSTRUCTION = (
     "after the D-number with sketch.renameConstraint(index, \"D<n>\") "
     "right after adding it, so the value can be read back exactly. "
     "Every built dimension MUST have a FEATURE_MAP entry; a dimension "
-    "without one will show ? in the table, never a guessed value."
+    "without one will show ? in the table, never a guessed value. "
+    "Feature order (REQUIRED): build ALL Pad and Pocket features "
+    "first, in body order, and put ALL finishing operations "
+    "(Chamfer, Fillet, Round) LAST, after every Pad/Pocket. Never "
+    "apply a Chamfer/Fillet in the middle of the tree (for example "
+    "right after a Pad_Body) and then keep building Pockets after "
+    "it: a mid-tree Chamfer changes the tip and later features can "
+    "lose earlier Pads. A Chamfer/Fillet Base must be the "
+    "immediately preceding feature (the current tip), never an "
+    "earlier Pad/Pocket -- basing a Chamfer on an earlier Pad drops "
+    "every Pad built after that Pad from the result."
 )
 
 ASK_FIRST_INSTRUCTION = (
@@ -781,8 +791,16 @@ def classify_diagnosis(diagnosis_text):
 # correct inward cut). That needs a STEP face-position check, which
 # is NOT part of this change; volume + history is the first gate,
 # not the whole drawing comparison.
+# CHECK-line format is LLM-written and varies per macro, so the
+# pattern must accept every format actually seen in home runs:
+# "solids=1 valid=True vol=123.456" (140309 macro) AND
+# "solids 1 valid True volume 123.456" (161949 / 163341 macros).
+# A format-specific pattern silently parses 0 lines and the gate
+# is skipped -- exactly what happened in the 161949 / 163341 runs,
+# where the gate code was present but found no CHECK lines.
 _CHECK_RE = re.compile(
-    r"CHECK\s+(\S+)\s+solids=(\d+)\s+valid=(\w+)\s+vol=([0-9.]+)")
+    r"CHECK\s+(\S+)\s+solids[= ](\d+)\s+valid[= ](\w+)\s+"
+    r"(?:vol|volume)[= ]([0-9.]+)")
 
 
 def parse_check_lines(run_log_text):
@@ -844,6 +862,26 @@ def evaluate_feature_history(checks):
             "delta": round(delta, 4), "verdict": verdict,
             "reason": reason,
         })
+    # Finishing-order gate: Chamfer/Fillet must be LAST. A Chamfer
+    # followed by any later Pad/Pocket is a FAIL even when its own
+    # volume delta looks fine -- in the 163341 run a mid-tree
+    # Chamfer based on Pad_Body dropped the Pad_Ring boss from the
+    # result (bbox X 15 -> 13.5) and every Pocket after it was
+    # built on the wrong tip. Fillet/Round names are checked too.
+    for i, rec in enumerate(records):
+        if rec["feature"].startswith(("Chamfer", "Fillet", "Round")):
+            later = [r["feature"] for r in records[i + 1:]
+                     if r["feature"].startswith(("Pad", "Pocket"))]
+            if later:
+                rec["verdict"] = "FAIL"
+                rec["reason"] = (
+                    "Finishing operation must be LAST: this "
+                    "Chamfer/Fillet appears before later Pad/Pocket "
+                    f"features ({', '.join(later)}). Move all "
+                    "Chamfer/Fillet features to the end of the tree, "
+                    "after every Pad/Pocket, and base each one on "
+                    "the immediately preceding feature (tip), never "
+                    "on an earlier Pad/Pocket.")
     return records
 
 
