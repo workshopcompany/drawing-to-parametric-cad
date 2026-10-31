@@ -275,3 +275,10 @@ general tolerance ±0.1 mm), shown next to Measured. A row can
 therefore show Result X with Measured result O: the modeling
 mapping was wrong for that row, but the real geometry matches.
 Rows without a measurement show ? in the measured verdict.
+
+## Questions display guard (Oct 30, 2026)
+- The result page no longer displays questions.txt verbatim. Only
+  validated `Q<number>:` lines are shown as questions; an old file
+  containing code or prose is replaced by a warning, and it does
+  not drive the ❓ banner. The full response stays in guidance.txt /
+  raw_response.txt.

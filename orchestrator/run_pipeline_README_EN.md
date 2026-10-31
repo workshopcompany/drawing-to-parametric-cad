@@ -210,3 +210,17 @@ if there is no measurement. It is deliberately NOT the strict
 1.739 vs 1.70) would otherwise show X. The web UI shows it as a
 "Measured result" column next to Measured, separate from the
 modeling-based Result.
+
+## questions.txt contract (Oct 30, 2026, questions-window macro dump guard)
+- questions.txt is written ONLY by `write_questions()`, with validated
+  `Q<number>:` lines only. Code, prose, and whole responses never go
+  there (they stay in raw_response.txt / guidance.txt).
+- A fenceless macro is still code: `looks_like_question()` treats any
+  response with FreeCAD code markers as code, not a question, and
+  `extract_macro()` extracts fenceless code too. Previously a
+  fenceless macro was misclassified as a design question because of
+  `QUESTION:` log strings and `?`, and the whole macro was dumped
+  into questions.txt.
+- A new run starts with no questions.txt, and a clean final attempt
+  deletes any earlier attempt's questions.txt, so a stale file can
+  never drive the banner.

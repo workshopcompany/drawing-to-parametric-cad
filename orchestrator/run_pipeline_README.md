@@ -143,3 +143,8 @@ macro.py가 없는 폴더는 예전 행을 유지하고, 검증 실패가 좋은
 표의 엄격 0.01이 아닌 이유는, 받아들인 윤곽 편차(뾰족 높이 1.739 대
 1.70)까지 X로 뜨면 안 되기 때문이야. 웹 UI에서는 모델링 기반 Result와
 별도로 Measured 옆에 "실측 판정" 칸으로 보여.
+
+## questions.txt 계약 (2026-10-30, 질문창 매크로 덤프 방지)
+- questions.txt는 `write_questions()`로만 쓰고, 검증된 `Q숫자:` 줄만 들어간다. 코드, 일반 글, 응답 전체는 절대 여기에 쓰지 않는다 (raw_response.txt / guidance.txt에 남는다).
+- fence 없는 매크로도 코드로 취급한다: `looks_like_question()`은 FreeCAD 코드 흔적이 있으면 질문이 아니라고 판단하고, `extract_macro()`는 fence 없는 코드도 매크로로 추출한다. 예전에는 fence 없는 매크로가 `QUESTION:` 로그 문자열과 `?` 때문에 디자인 질문으로 오판돼 전체가 questions.txt에 들어갔다.
+- 새 실행 시작 때 questions.txt를 지우고, 질문 없는 최종 시도는 이전 시도의 questions.txt를 삭제한다. 오래된 파일이 배너를 끌고 다니지 않는다.

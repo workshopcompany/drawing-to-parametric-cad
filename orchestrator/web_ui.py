@@ -366,6 +366,19 @@ S = {
                        "so answer and continue below.",
                        "매크로 주석/출력에서 뽑은 질문입니다. 임시값으로 만든 "
                        "결과라면, 답을 주고 다시 실행하세요."),
+    "questions_invalid": ("⚠️ Questions file has an invalid format — "
+                          "not shown as questions (see guidance.txt / "
+                          "raw_response.txt)",
+                          "⚠️ 질문 파일 형식이 올바르지 않아 질문으로 표시하지 "
+                          "않습니다 (guidance.txt / raw_response.txt 확인)"),
+    "questions_invalid_note": ("This questions.txt does not contain valid "
+                               "Q-lines, so it is not displayed as questions. "
+                               "It may be from an older run; the current "
+                               "pipeline never writes code or prose here.",
+                               "이 questions.txt에는 유효한 Q줄이 없어 질문으로 "
+                               "표시하지 않습니다. 예전 실행 파일일 수 있습니다. "
+                               "현재 파이프라인은 코드나 일반 글을 여기에 쓰지 "
+                               "않습니다."),
     "continue_folder_title": ("Continue from a work folder",
                                "작업 폴더에서 이어서 작업"),
     "continue_folder_note": ("Pick a previous result folder and rerun it. "
@@ -1307,6 +1320,30 @@ def build_xlsx(headers, rows_values):
     return buf.getvalue()
 
 
+def valid_questions_text(text):
+    """True iff text is ONLY validated Q-lines, never code/prose.
+
+    Defense in depth for the Oct 30, 2026 questions-window macro
+    dump: even if an old (or foreign) questions.txt contains a
+    macro, the result page must not display it as questions, use
+    its labels for prefill, or let it drive the QUESTIONS banner.
+    A valid file is 1+ lines, each "Q<n>: <single-line text>",
+    with no code marker anywhere.
+    """
+    if not (text or "").strip():
+        return False
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines or len(lines) > 50:
+        return False
+    low = text.lower()
+    if any(m in low for m in ("```", "import freecad", "partdesign",
+                              "import part", "sketcher", "involutegear",
+                              "app.newdocument", "body.newobject")):
+        return False
+    import re as _re2
+    return all(_re2.match(r"Q\d+:\s+\S", ln.strip()) for ln in lines)
+
+
 def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
     # tabbed cards for input images, 3D previews, files/downloads, QA logs.
@@ -1328,12 +1365,19 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     if questions_file.is_file():
         questions_text = questions_file.read_text(encoding="utf-8",
                                                   errors="replace")
-    # Questions exist: this is NOT a success, even though exit 0
-    # and a valid solid exist. The banner says QUESTIONS, keyed off
-    # questions.txt itself (not the report RESULT line), so reopening
-    # an older result folder shows the same banner.
-    if questions_text.strip():
+    # Valid questions exist: this is NOT a success, even though
+    # exit 0 and a valid solid exist. The banner keys off VALIDATED
+    # questions only (not raw file existence): an old/invalid
+    # questions.txt (e.g. a macro dumped there by a pre-guard run)
+    # must never drive the banner or be displayed as questions.
+    questions_valid = valid_questions_text(questions_text)
+    questions_display = (questions_text if questions_valid
+                         else (tr(lang, 'questions_invalid_note')
+                               if questions_text.strip() else ""))
+    if questions_valid:
         banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
+    elif questions_text.strip():
+        banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_invalid')}</span>")
     elif "ASK-FIRST" in report_text and not (output_dir / "model.fcstd").is_file():
         # Ask-first step with no questions: not a success either,
         # just ready to build. No model exists yet.
@@ -1350,7 +1394,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # With questions/guidance it is the answer form; otherwise it is a
     # plain "continue this project with new instructions" form.
     import re as _re
-    labels = _re.findall(r"(Q\d+)\s*:", questions_text)
+    labels = (_re.findall(r"(Q\d+)\s*:", questions_text)
+              if questions_valid else [])
     seen = []
     for label in labels:
         if label not in seen:
@@ -1362,7 +1407,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     askfirst_note = ""
     if not (output_dir / "model.fcstd").is_file():
         askfirst_note = (f"<p class=\"note\">{tr(lang, 'answer_askfirst_note')}</p>")
-    if questions_text.strip() or guidance_text.strip():
+    if questions_valid or guidance_text.strip():
         _form_title = tr(lang, 'answer_title')
         _form_note = tr(lang, 'answer_note')
         _form_label = tr(lang, 'answer_label')
@@ -1643,7 +1688,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <p class="note">{tr(lang, 'matching_disclaimer')}</p></div>
     </div>
     <div class="tab-panel" id="r4">
-      <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_text) if questions_text else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
+      <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_display) if questions_display else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
       {answer_form}
       <div class="grid2">
         <div class="card"><h3>{tr(lang, 'report_title')}</h3><pre>{html.escape(report_text) if report_text else tr(lang, 'report_none')}</pre></div>

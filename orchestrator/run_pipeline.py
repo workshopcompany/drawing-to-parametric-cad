@@ -365,6 +365,17 @@ def extract_macro(content):
     for fence in fences:
         if "import FreeCAD" in fence or "PartDesign" in fence:
             return fence.strip() + "\n"
+    # Fenceless code: a response that IS a macro (starts with a
+    # FreeCAD header or contains "import FreeCAD") must not be
+    # misread as prose or as a question. Return the code from its
+    # first code line onward; freecadcmd / the safety check will
+    # judge it from there, and a syntax failure self-fixes like
+    # any other code failure instead of polluting questions.txt.
+    if "import FreeCAD" in content:
+        starts = [i for i in (content.find("# FreeCAD macro"),
+                              content.find("import FreeCAD")) if i >= 0]
+        if starts:
+            return content[min(starts):].strip() + "\n"
     return None
 
 
@@ -409,7 +420,17 @@ def extract_feature_map(macro_text):
 
 
 def looks_like_question(content):
-    """Heuristic for a design-question response instead of code."""
+    """Heuristic for a design-question response instead of code.
+
+    Code is NEVER a question: a response containing FreeCAD code
+    markers (even without a fence, and even if it also contains
+    "?" or the word "question" inside log strings) is a macro
+    response, not a design question. Without this check, a
+    fenceless macro was misclassified and dumped whole into
+    questions.txt (Oct 30, 2026 home file).
+    """
+    if _is_code_like(content):
+        return False
     if extract_macro(content) is not None:
         return False
     lowered = content.lower()
@@ -493,6 +514,68 @@ def extract_questions(content, macro_text):
                 questions[label] = question[:500]
     return [(label, questions[label])
             for label in sorted(questions, key=lambda q: int(q[1:]))]
+
+
+# ---- questions.txt contract (Oct 30, 2026, questions-window macro dump) ----
+# Root cause, confirmed from a real home questions.txt (16,299 chars):
+# the LLM returned a macro WITHOUT a code fence. extract_macro()
+# requires a fence, so it returned None; looks_like_question() then
+# saw "?" and the word "question" inside log("QUESTION: ...") strings
+# and misclassified the whole macro as a design question; the
+# design-question fallback wrote the entire response verbatim into
+# questions.txt, and the web UI displayed it as "questions".
+# The fix is a contract, not one more filter:
+#  * questions.txt is written ONLY by write_questions(), and only
+#    with validated Q-lines. Code, prose, and whole responses NEVER
+#    go there; they belong in raw_response.txt / guidance.txt.
+#  * A response containing FreeCAD code is code, not a question,
+#    fence or no fence (see looks_like_question / extract_macro).
+#  * A new run starts with no questions.txt, and a clean final
+#    attempt deletes any earlier attempt's questions.txt, so a
+#    stale file can never drive the banner.
+_CODE_MARKERS = ("```", "import freecad", "partdesign", "import part",
+                 "sketcher", "involutegear", "app.newdocument",
+                 "body.newobject")
+
+
+def _is_code_like(text):
+    """True if text looks like FreeCAD code, not a question."""
+    low = (text or "").lower()
+    return any(m in low for m in _CODE_MARKERS)
+
+
+def write_questions(output_dir, questions):
+    """Write ONLY validated Q-lines to questions.txt.
+
+    questions is [(label, text), ...] from extract_questions().
+    A line is kept only if its label is Q<n>, its text is a single
+    line, 1-500 chars, and contains no code marker. Anything else
+    is dropped. When nothing valid remains, any existing
+    questions.txt is DELETED (stale questions must not survive a
+    clean attempt) and False is returned. Returns True iff a
+    non-empty, validated questions.txt was written.
+    """
+    valid = []
+    for label, text in (questions or []):
+        if not re.fullmatch(r"Q\d+", label or ""):
+            continue
+        txt = (text or "").strip()
+        if not txt or len(txt) > 500 or "\n" in txt or "\r" in txt:
+            continue
+        if _is_code_like(txt):
+            continue
+        valid.append((label, txt))
+    path = Path(output_dir) / "questions.txt"
+    if not valid:
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+        return False
+    path.write_text("\n".join(f"{label}: {text}" for label, text in valid)
+                    + "\n", encoding="utf-8")
+    return True
 
 
 def run_freecadcmd(freecadcmd, macro_path, log_path):
@@ -2342,6 +2425,16 @@ def main(argv=None):
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():
         self_fix_log.unlink()
+    # A new run starts with NO questions: a previous run's (or a
+    # previous attempt's) questions.txt must never drive this run's
+    # banner. New questions, if any, are written by write_questions()
+    # below; qa_history.txt (not questions.txt) carries history.
+    _qf = output_dir / "questions.txt"
+    if _qf.is_file():
+        try:
+            _qf.unlink()
+        except OSError:
+            pass
 
     drawing_path = Path(args.drawing)
     if not drawing_path.is_file():
@@ -2485,11 +2578,7 @@ def main(argv=None):
                         "dimensions, or PIL unavailable)")
         except Exception as exc:
             report_lines.append(f"Numbered dimensions: unavailable ({exc})")
-        if questions:
-            questions_text = "\n".join(f"{label}: {text}"
-                                       for label, text in questions)
-            (output_dir / "questions.txt").write_text(
-                questions_text + "\n", encoding="utf-8")
+        if questions and write_questions(output_dir, questions):
             report_lines.append(
                 "Questions (unanswered, from ask-first step): "
                 + "; ".join(f"{label}: {text}"
@@ -2502,17 +2591,21 @@ def main(argv=None):
                 "RESULT: ASK-FIRST NO QUESTIONS (no model built yet, "
                 "press Continue work to build)")
         else:
-            # Unformatted questions: do NOT silently pass. Keep the
-            # whole answer as questions so the user can answer it.
-            fallback = content.strip()[:4000]
-            (output_dir / "questions.txt").write_text(
-                f"Q1: {fallback}\n", encoding="utf-8")
+            # Unformatted / non-question response: NEVER dump it
+            # into questions.txt (that is how a whole macro ended
+            # up in the question window). Keep it visible in
+            # guidance.txt + raw_response.txt, leave questions.txt
+            # empty, and say so plainly. The Continue form is
+            # always shown, so this is not a dead end.
+            write_questions(output_dir, [])
+            (output_dir / "guidance.txt").write_text(
+                "ASK-FIRST response was not questions (code/prose, "
+                "not Q-lines). See raw_response.txt for the full "
+                "response. Press Continue work to retry or build.\n\n"
+                + content.strip() + "\n", encoding="utf-8")
             report_lines.append(
-                "Questions (unanswered, from ask-first step, "
-                "unformatted): " + fallback.replace("\n", " ")[:500])
-            report_lines.append(
-                "RESULT: QUESTIONS PENDING (ask-first - no model built "
-                "yet, answer questions.txt and continue)")
+                "RESULT: ASK-FIRST INVALID RESPONSE (not questions, "
+                "see guidance.txt, no model built yet)")
         write_report(output_dir / "report.txt", report_lines)
         print("\n".join(report_lines))
         return 0
@@ -2625,18 +2718,15 @@ def main(argv=None):
                 f"{content}\n"
             )
             (output_dir / "guidance.txt").write_text(guidance, encoding="utf-8")
-            # Also write questions.txt: otherwise the web UI shows
-            # "(None - this macro asked no questions)" and NO Continue
-            # form, a dead end (Oct 30 home run: full Q1-Q12 answers
-            # in, FAIL design question out, no way to continue).
+            # Write ONLY validated Q-lines to questions.txt.
+            # The old fallback wrote the whole response here when
+            # no Q-lines were found, which is how a fenceless macro
+            # ended up in the question window. The full response
+            # stays visible in guidance.txt + raw_response.txt.
+            # The Continue form is always shown, so an empty
+            # questions.txt is not a dead end.
             _qs = extract_questions(content, "")
-            if _qs:
-                _qt = "\n".join(f"{label}: {text}"
-                                 for label, text in _qs)
-            else:
-                _qt = content.strip()
-            (output_dir / "questions.txt").write_text(
-                _qt + "\n", encoding="utf-8")
+            write_questions(output_dir, _qs)
             report_lines.append("RESULT: FAIL - design question, see guidance.txt")
             write_report(output_dir / "report.txt", report_lines)
             print(guidance)
@@ -2656,11 +2746,11 @@ def main(argv=None):
         # A macro that invents provisional values while asking Q1-Q9
         # must not later read as a clean PASS.
         questions = extract_questions(content, macro_text)
-        if questions:
-            questions_text = "\n".join(f"{label}: {text}"
-                                       for label, text in questions)
-            (output_dir / "questions.txt").write_text(
-                questions_text + "\n", encoding="utf-8")
+        # write_questions() validates AND deletes any stale
+        # questions.txt when this attempt asked nothing, so a
+        # clean final attempt can never inherit an earlier
+        # attempt's questions (and its banner).
+        if write_questions(output_dir, questions):
             report_lines.append(
                 "Questions (unanswered, from macro): "
                 + "; ".join(f"{label}: {text}"
