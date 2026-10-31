@@ -237,3 +237,17 @@ modeling-based Result.
   DIFF = value present but different from the drawing (which can
   also be a drawing misread); REF = tolerance/general-chamfer
   note rows, not geometry.
+
+## FEATURE_MAP guard + remap (--remap)
+- Build guard: right after a macro is extracted, before any
+  FreeCAD run, the pipeline checks whether FEATURE_MAP covers
+  the current D-list. Missing numbers (and not the last attempt)
+  send that attempt back as a self-fix reason instead of
+  spending a FreeCAD run. The last attempt skips the guard, so a
+  correct model is never discarded for a missing map alone.
+- Remap: for a folder whose model is right but whose table is
+  blind, the matching tab's remap button rebuilds ONLY the map:
+  one short LLM call from the D-list + .fcstd dump, validated
+  against the dump, saved to mapping.json, matching.json
+  rebuilt. The model, macro, and report are never changed;
+  unvalidated entries are dropped with reasons in remap_log.txt.

@@ -296,6 +296,22 @@ S = {
                      "다시 만들지 않고, 실패로 처리하지도 않습니다. 빠진 "
                      "특징은 이력으로 남아 다음 계속 작업에 같이 들어갑니다."),
     "inspect_title": ("Feature check", "특징 검사"),
+    "remap_btn": ("Remap FEATURE_MAP", "매핑 다시 채우기"),
+    "remap_note": ("The model stays as it is. Only the FEATURE_MAP "
+                   "is rebuilt (one short LLM call from the D-list + "
+                   ".fcstd dump, validated against the dump), then "
+                   "the Modeling column is refilled. Use it when the "
+                   "table shows ? with \"no FEATURE_MAP entry\".",
+                   "모델은 그대로 둡니다. D목록 + .fcstd 정보만으로 "
+                   "FEATURE_MAP만 다시 만들고(짧은 LLM 호출 1회, "
+                   "덤프 대조 검증 후 저장), Modeling 열을 다시 "
+                   "채웁니다. 표가 ?에 \"no FEATURE_MAP entry\"로 "
+                   "뜰 때 쓰세요."),
+    "err_remap_failed": ("Remap failed. See remap_log.txt in the "
+                         "folder. The model was not changed.",
+                         "매핑 다시 채우기에 실패했습니다. 폴더의 "
+                         "remap_log.txt를 보세요. 모델은 바뀌지 "
+                         "않았습니다."),
     "inspect_history_title": ("Feature-check history", "특징 검사 이력"),
     "err_inspect_failed": ("Feature check failed. See web_ui_inspect.log "
                            "in the folder.",
@@ -1657,6 +1673,25 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
             f"<div class=\"card\"><h3>🔍 {tr(lang, 'inspect_title')}</h3>"
             f"<pre>{html.escape(inspect_text)}</pre>{_hist}</div>")
 
+    # Remap button: rebuilds ONLY the FEATURE_MAP (one short
+    # LLM call, validated against the .fcstd dump) and refills
+    # the Modeling column. Shown when a matching table exists;
+    # the model, macro, and report are never changed by it.
+    remap_block = ""
+    if (output_dir / "matching.json").is_file():
+        remap_block = (
+            f"<form action=\"/remap\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"dir\" value=\"{html.escape(str(output_dir))}\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<label>freecadcmd <input type=\"text\" name=\"freecadcmd\" "
+            f"value=\"freecadcmd\"></label> "
+            f"<label>Meta API key <input type=\"password\" "
+            f"name=\"api_key\"></label> "
+            f"<button class=\"btn\" type=\"submit\">"
+            f"{tr(lang, 'remap_btn')}</button></form>"
+            f"<p class=\"note\">{tr(lang, 'remap_note')}</p>")
+
     measure_block = ""
     step_path = output_dir / "model.step"
     if step_path.is_file():
@@ -1741,6 +1776,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       {measure_block}
       {inspect_block}
       {inspect_card}
+      {remap_block}
       <p class="note">{tr(lang, 'matching_legend')}</p>
       <p class="note">{tr(lang, 'matching_disclaimer')}</p></div>
     </div>
@@ -1935,7 +1971,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap"):
             self.send_error(404, "Not found")
             return
         try:
@@ -2034,6 +2070,57 @@ class Handler(BaseHTTPRequestHandler):
                     timeout=3600, env=inspect_env)
             if result.returncode != 0:
                 data = error_page(tr(lang, "err_inspect_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/remap":
+            # Remap: no rebuild, no model change. Runs
+            # run_pipeline.py --remap on the folder (one short LLM
+            # call), then shows the result page with the refilled
+            # Modeling column. A remap failure leaves the model and
+            # the old table untouched.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            if not (output_dir / "matching.json").is_file():
+                data = error_page(tr(lang, "err_export_nomatch"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            api_key = fields.get("api_key", "")
+            if not api_key and not dotenv_key_present():
+                data = error_page(tr(lang, "err_key"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--remap",
+                       "--output-dir", str(output_dir),
+                       "--freecadcmd", freecadcmd_value]
+            log_path = output_dir / "web_ui_remap.log"
+            remap_env = dict(os.environ)
+            remap_env["PYTHONUTF8"] = "1"
+            if api_key:
+                remap_env["META_API_KEY"] = api_key
+            else:
+                remap_env.pop("META_API_KEY", None)
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=remap_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_remap_failed"), lang=lang)
                 self._send_html(400, data)
                 return
             data = result_page(output_dir, 0, lang=lang)

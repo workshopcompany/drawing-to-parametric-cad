@@ -153,3 +153,7 @@ macro.py가 없는 폴더는 예전 행을 유지하고, 검증 실패가 좋은
 - 기존 결과 폴더를 다시 만들지 않고 검사만 한다: 현재 .fcstd + STEP을 새로 검증하고, 매칭표 + FEATURE_MAP과 대조해 feature_check.txt/.json을 쓰고, feature_check_history.txt에 한 줄 요약(OK/MISS/DIFF/?/REF + 빠진 목록)을 추가한다.
 - 검사가 빠짐을 찾아도 종료 코드는 0이고, 모델/매크로/report.txt는 바꾸지 않는다. 빠짐은 "다음 Continue에서 고칠 목록"이지 "실패해서 버릴 모델"이 아니다.
 - MISS는 모델링값이 없거나 .fcstd에 특징이 없는 경우, DIFF는 값은 있는데 도면값과 다른 경우(도면 오독일 수도 있음), REF는 공차/일반 챔퍼 같은 비형상 행이다.
+
+## FEATURE_MAP 가드 + 다시 채우기 (--remap)
+- 빌드 가드: 매크로를 뽑은 직후 FreeCAD를 돌리기 전에, 현재 D목록을 FEATURE_MAP이 다 덮는지 검사한다. 빠진 번호가 있고 마지막 시도가 아니면 그 시도는 모델을 만들지 않고 재시도 사유로 돌린다("FEATURE_MAP incomplete: missing D..."). 마지막 시도에서는 가드를 건너뛰어, 올바른 모델을 지도 누락만으로 버리지 않는다.
+- 다시 채우기: 모델은 맞는데 표만 ?인 폴더는 매칭 탭의 "매핑 다시 채우기" 버튼으로 고친다. --remap은 모델/매크로/report를 바꾸지 않고, D목록 + .fcstd 덤프만으로 짧은 LLM 호출 1회로 FEATURE_MAP만 새로 받아, 덤프 대조로 검증된 항목만 mapping.json에 저장하고 matching.json을 다시 만든다. 검증 안 되는 항목은 버리고 remap_log.txt에 이유를 남긴다.

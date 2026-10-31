@@ -2228,6 +2228,179 @@ def run_measure_mode(output_dir, freecadcmd):
     return 0
 
 
+def run_remap_mode(output_dir, freecadcmd, model, max_tokens, dry_run):
+    """Repair a folder's FEATURE_MAP without rebuilding the model.
+
+    Used by the matching-table "Remap" button when a build produced
+    a correct model but a blind table (all D-rows "?" with
+    "no FEATURE_MAP entry"). One short LLM call is given ONLY the
+    folder's D-list + the .fcstd feature dump (no drawing, no
+    rebuild) and must return a FEATURE_MAP dict literal. Every
+    returned entry is validated with resolve_mapping_value against
+    the dump; entries that do not resolve are dropped with a reason
+    in remap_log.txt, never kept as guesses. The validated map is
+    saved to mapping.json (old map kept as mapping_before_remap.json)
+    and matching.json is rebuilt from it. model.fcstd, model.step,
+    macro.py, and report.txt are never changed. Returns 0 when a
+    validated map was saved and matching.json rebuilt, 1 on hard
+    failure (missing files, no API key, API error, or no entry
+    validated) -- a remap failure never touches the model.
+    """
+    macro_path = output_dir / "macro.py"
+    fcstd_path = output_dir / "model.fcstd"
+    step_path = output_dir / "model.step"
+    matching_path = output_dir / "matching.json"
+    log_lines = []
+    def _log(msg):
+        log_lines.append(msg)
+        print(msg)
+    for needed, label in ((macro_path, "macro.py"),
+                          (fcstd_path, "model.fcstd"),
+                          (step_path, "model.step"),
+                          (matching_path, "matching.json")):
+        if not needed.is_file():
+            _log(f"REMAP FAIL: {label} missing in {output_dir}")
+            (output_dir / "remap_log.txt").write_text(
+                "\n".join(log_lines) + "\n", encoding="utf-8")
+            return 1
+    try:
+        rows = json.loads(matching_path.read_text(encoding="utf-8"))
+    except Exception:
+        rows = []
+    d_rows = [r for r in rows if re.match(r"D\d+$", str(r.get("no", "")))]
+    if not d_rows:
+        _log("REMAP FAIL: no D-rows in matching.json to map")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 1
+    d_lines = []
+    for r in d_rows:
+        item = str(r.get("item", ""))
+        view = r.get("view")
+        if not view:
+            vm = re.search(r"\[(front|section|side|top)\]\s*$", item)
+            view = vm.group(1) if vm else None
+        label = re.sub(r"\s*\[(front|section|side|top)\]\s*$", "", item)
+        val = r.get("drawing")
+        if val is None:
+            continue
+        d_lines.append(f"{r.get('no')}: {label} = {val} mm"
+                       f"{' [' + view + ']' if view else ''}")
+    features_data = run_read_features(freecadcmd, fcstd_path, output_dir)
+    if features_data is None:
+        _log("REMAP FAIL: .fcstd feature dump unreadable")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 1
+    by_name = _features_by_name(features_data)
+    feat_lines = []
+    for name, feat in by_name.items():
+        cons = [(c.get("name"), c.get("value"))
+                for c in (feat.get("constraints") or [])]
+        feat_lines.append(
+            f"- {name}: length={feat.get('length')} "
+            f"size={feat.get('size')} sketch={feat.get('sketch')} "
+            f"constraints={cons}")
+    prompt = (
+        "Write ONLY a FEATURE_MAP dict literal in a python code fence.\n"
+        "Map EVERY D-number below to the feature in the .fcstd dump "
+        "that creates that dimension. Use feature names EXACTLY as "
+        "listed; do not invent features, sketches, or constraint "
+        "names. Kinds: pad_length (feature Length), chamfer_size "
+        "(feature Size), diameter/radius (feature's cylinder), "
+        "feature_extent (axis X/Y/Z), sketch_constraint (ONLY when "
+        "the sketch already has a constraint named exactly D<n>). "
+        "Reference/note rows (tolerance, general chamfer) need no "
+        "entry. If a row cannot be mapped from the dump data, "
+        "leave it out -- do not guess.\n\n"
+        "Dimensions:\n" + "\n".join(d_lines) + "\n\n"
+        "Features in .fcstd:\n" + "\n".join(feat_lines) + "\n")
+    (output_dir / "remap_prompt.txt").write_text(prompt, encoding="utf-8")
+    if dry_run:
+        _log("REMAP DRY-RUN: prompt written to remap_prompt.txt, "
+             "no API call, no mapping change")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 0
+    api_key = os.environ.get("META_API_KEY") or load_dotenv_key()
+    if not api_key:
+        _log("REMAP FAIL: META_API_KEY is not set (password field "
+             "or local .env)")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 1
+    try:
+        response_json = call_api(api_key, model, max_tokens,
+                                 [{"role": "user",
+                                   "content": prompt}])
+        content = extract_content(response_json)
+    except RuntimeError as exc:
+        _log(f"REMAP FAIL: API error: {exc}")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 1
+    (output_dir / "remap_raw_response.txt").write_text(
+        json.dumps(response_json, indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    candidate, warn = extract_feature_map(content)
+    if warn:
+        _log(f"REMAP FAIL: {warn}")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 1
+    validated = {}
+    dropped = []
+    for d_id, entry in candidate.items():
+        value, method = resolve_mapping_value(d_id, entry, by_name)
+        if value is not None:
+            validated[d_id] = entry
+        else:
+            dropped.append(f"{d_id}: {method}")
+    _log(f"REMAP: {len(validated)} entries validated, "
+         f"{len(dropped)} dropped")
+    for d in dropped:
+        _log(f"  dropped {d}")
+    if not validated:
+        _log("REMAP FAIL: no entry validated against the .fcstd dump")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 1
+    mapping_file = output_dir / "mapping.json"
+    if mapping_file.is_file():
+        try:
+            (output_dir / "mapping_before_remap.json").write_text(
+                mapping_file.read_text(encoding="utf-8"),
+                encoding="utf-8")
+        except OSError:
+            pass
+    mapping_file.write_text(json.dumps(validated, indent=2,
+                                       ensure_ascii=False),
+                            encoding="utf-8")
+    try:
+        verification = verify_step(freecadcmd, step_path, output_dir)
+        macro_text = macro_path.read_text(encoding="utf-8",
+                                          errors="replace")
+        new_rows = build_matching(verification, macro_text,
+                                  "\n".join(d_lines), mapping=validated,
+                                  features=features_data)
+        matching_path.write_text(json.dumps(new_rows, indent=2,
+                                            ensure_ascii=False),
+                                 encoding="utf-8")
+        filled = sum(1 for r in new_rows
+                     if re.match(r"D\d+$", str(r.get("no", "")))
+                     and r.get("modeling") is not None)
+        _log(f"REMAP OK: matching.json rebuilt, "
+             f"{filled}/{len(d_rows)} D-rows now have modeling values")
+    except Exception as exc:
+        _log(f"REMAP FAIL: matching rebuild failed ({exc})")
+        (output_dir / "remap_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return 1
+    (output_dir / "remap_log.txt").write_text(
+        "\n".join(log_lines) + "\n", encoding="utf-8")
+    return 0
+
+
 def run_inspect_mode(output_dir, freecadcmd):
     """Feature inspection for an existing result folder (separate button).
 
@@ -2569,6 +2742,16 @@ def parse_args(argv=None):
                         "the model, macro, or report.txt. Needs only "
                         "--output-dir (+ --freecadcmd); no drawing, "
                         "no API call.")
+    parser.add_argument("--remap", action="store_true",
+                        help="Repair an existing result folder's "
+                        "FEATURE_MAP without rebuilding the model: "
+                        "ask the LLM (one short call) for a FEATURE_MAP "
+                        "only, from the folder's D-list + .fcstd dump, "
+                        "validate it against the dump, save mapping.json, "
+                        "and rebuild matching.json. The model, macro, "
+                        "and report.txt are never changed. Needs only "
+                        "--output-dir (+ --freecadcmd); with --dry-run "
+                        "it writes remap_prompt.txt and calls no API.")
     return parser.parse_args(argv)
 
 
@@ -2591,8 +2774,11 @@ def main(argv=None):
         return run_measure_mode(output_dir, args.freecadcmd)
     if args.inspect:
         return run_inspect_mode(output_dir, args.freecadcmd)
+    if args.remap:
+        return run_remap_mode(output_dir, args.freecadcmd, args.model,
+                              args.max_tokens, args.dry_run)
     if not args.drawing:
-        die("--drawing is required unless --measure or --inspect is given.")
+        die("--drawing is required unless --measure, --inspect, or --remap is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():
@@ -2937,6 +3123,37 @@ def main(argv=None):
             append_log(self_fix_log,
                        f"Attempt {attempt}: macro NOT run. {last_error}")
             continue
+
+        # FEATURE_MAP guard (Oct 30, 2026 home gear run): a macro
+        # that builds correct geometry but writes no FEATURE_MAP
+        # leaves every D-row "?" (no FEATURE_MAP entry). That is a
+        # self-fixable code omission, not a model failure: retry
+        # the attempt with an explicit instruction to add the map
+        # for the CURRENT D-list, before spending a FreeCAD run.
+        # On the last attempt the guard is skipped, so a correct
+        # model is never discarded for a missing map alone. When
+        # there is no numbered D-list at all, there is nothing to
+        # cover and the guard is skipped.
+        _map_guard, _map_warn = extract_feature_map(macro_text)
+        _d_ids_guard = [d["id"] for d in
+                        parse_numbered_dimensions(args.text or "")]
+        if _d_ids_guard and attempt < MAX_ATTEMPTS:
+            _missing_guard = [d for d in _d_ids_guard
+                              if d not in _map_guard]
+            if _missing_guard:
+                last_error = (
+                    f"FEATURE_MAP incomplete: missing "
+                    f"{', '.join(_missing_guard)} "
+                    f"({_map_warn or 'map present but incomplete'}). "
+                    f"Add a FEATURE_MAP at the top of the macro "
+                    f"mapping EVERY D-number in the current "
+                    f"dimension list to its sketch/feature, using "
+                    f"the feature name exactly as created in the "
+                    f"macro (kind + sketch where needed). Do not "
+                    f"change any dimension, feature, or geometry.")
+                append_log(self_fix_log,
+                           f"Attempt {attempt}: {last_error}")
+                continue
 
         run_log = output_dir / "run.log"
         try:

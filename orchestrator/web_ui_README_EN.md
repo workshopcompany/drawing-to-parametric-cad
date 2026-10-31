@@ -291,3 +291,10 @@ Rows without a measurement show ? in the measured verdict.
   (feature_check_history.txt) into the next run's prompt alongside
   the Q&A history, and copies the history file into the new folder
   so it keeps accumulating.
+
+## Remap button
+- The "Remap FEATURE_MAP" button under the matching tab does
+  not rebuild the model. It rebuilds only the FEATURE_MAP from
+  the D-list + .fcstd dump, validates it, saves it, and refills
+  the Modeling column. It needs an API key (password field, or
+  the local .env file).
