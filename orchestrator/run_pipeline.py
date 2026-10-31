@@ -3039,6 +3039,368 @@ def run_read_features(freecadcmd, fcstd_path, output_dir):
     return data
 
 
+def extract_patch_replacements(content):
+    """Parse a JSON replacement list from an LLM patch response.
+
+    Accepted shapes (in a ```json fence, a plain fence, or bare):
+    [{"old": "<exact text>", "new": "<exact text>"}, ...]
+    {"replacements": [{...}, ...]}
+    Returns (replacements, error_or_None). The list is validated
+    for shape only here; apply_patch_replacements() validates
+    each "old" against the actual macro (exactly one occurrence).
+    """
+    candidates = []
+    for fence in re.findall(r"```[^\n]*\n(.*?)```", content or "", re.DOTALL):
+        candidates.append(fence.strip())
+    candidates.append((content or "").strip())
+    for cand in candidates:
+        if not cand:
+            continue
+        # Try the whole candidate, then its outermost [...] / {...}
+        tries = [cand]
+        for open_ch, close_ch in (("[", "]"), ("{", "}")):
+            start = cand.find(open_ch)
+            end = cand.rfind(close_ch)
+            if 0 <= start < end:
+                tries.append(cand[start:end + 1])
+        for text in tries:
+            try:
+                data = json.loads(text)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                data = data.get("replacements")
+            if not isinstance(data, list) or not data:
+                continue
+            replacements = []
+            bad = False
+            for item in data:
+                if not isinstance(item, dict):
+                    bad = True
+                    break
+                old = item.get("old")
+                new = item.get("new", "")
+                if not isinstance(old, str) or not old:
+                    bad = True
+                    break
+                if not isinstance(new, str):
+                    bad = True
+                    break
+                replacements.append({"old": old, "new": new})
+            if not bad and replacements:
+                return replacements, None
+    return [], ("no JSON replacement list found in patch response "
+                "(expected one ```json fence with "
+                '[{"old": "...", "new": "..."}])')
+
+
+def apply_patch_replacements(macro_text, replacements):
+    """Apply replacements to macro_text, all-or-nothing.
+
+    Every "old" string must occur EXACTLY once in the macro.
+    If any occurs 0 or 2+ times, NOTHING is applied and the
+    errors name the failing replacement, so a partial patch can
+    never leave a half-edited macro. Returns
+    (new_text, applied_count, errors).
+    """
+    errors = []
+    for index, rep in enumerate(replacements):
+        count = macro_text.count(rep["old"])
+        if count != 1:
+            errors.append(
+                f"replacement {index + 1}: old text occurs {count} "
+                f"times, expected exactly 1 "
+                f"(first 80 chars: {rep['old'][:80]!r})")
+    if errors:
+        return macro_text, 0, errors
+    new_text = macro_text
+    for rep in replacements:
+        new_text = new_text.replace(rep["old"], rep["new"], 1)
+    return new_text, len(replacements), []
+
+
+def export_step_from_fcstd(freecadcmd, fcstd_path, step_path, output_dir):
+    """Fallback STEP export when a macro saved .fcstd but not .step.
+
+    Opens the .fcstd, exports the PartDesign Body shape (or, if no
+    Body exists, the first solid-bearing object) to step_path.
+    Returns True when step_path exists afterwards. This is the
+    Oct 31, 2026 home case (182125 attempt 4: fcstd present, step
+    missing, whole run failed for a missing export alone).
+    """
+    snippet = output_dir / "export_step_patch.py"
+    snippet.write_text(
+        "import FreeCAD\n"
+        f"doc = FreeCAD.openDocument({str(fcstd_path)!r})\n"
+        "body = None\n"
+        "for obj in doc.Objects:\n"
+        "    if obj.TypeId == 'PartDesign::Body':\n"
+        "        body = obj\n"
+        "        break\n"
+        "target = body if body is not None else None\n"
+        "if target is None:\n"
+        "    for obj in doc.Objects:\n"
+        "        try:\n"
+        "            if obj.Shape and obj.Shape.Solids:\n"
+        "                target = obj\n"
+        "                break\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "if target is not None:\n"
+        "    target.Shape.exportStep(" + f"{str(step_path)!r}" + ")\n"
+        "    print('EXPORT_STEP_OK')\n"
+        "else:\n"
+        "    print('EXPORT_STEP_NO_TARGET')\n",
+        encoding="utf-8",
+    )
+    log_path = output_dir / "export_step_patch.log"
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_file:
+            subprocess.run([freecadcmd, str(snippet)],
+                           stdout=log_file, stderr=subprocess.STDOUT,
+                           timeout=600)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return step_path.is_file()
+
+
+def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
+                   dry_run):
+    """Patch the existing macro.py in place — no regeneration.
+
+    Why this mode exists (Oct 31, 2026 user instruction): a
+    modification request must NOT regenerate the whole macro.
+    The existing macro.py is read, the LLM returns ONLY a JSON
+    list of exact-string replacements for the parts the user's
+    instructions require, the replacements are applied
+    all-or-nothing, and freecadcmd runs ONCE. No drawing is
+    re-read, no image is sent (text-only call), no 4-attempt
+    loop, no FEATURE_MAP guard consuming attempts, no new
+    folder. Cost driver is output size: a diff is a few hundred
+    tokens, a full macro is ~17 KB, so this is the part that
+    makes a modification fast. On ANY failure (no macro, bad
+    patch, safety hit, syntax error, freecadcmd/STEP failure,
+    feature gate FAIL) the macro is left exactly as it was
+    except for a successful application followed by a failed
+    build — in that case macro.prev.py holds the pre-patch
+    macro and patch_log.txt says how to restore it. Returns
+    0 on a verified patched model, 1 otherwise.
+    """
+    macro_path = output_dir / "macro.py"
+    fcstd_path = output_dir / "model.fcstd"
+    step_path = output_dir / "model.step"
+    log_lines = []
+
+    def _log(msg):
+        log_lines.append(msg)
+        print(msg)
+
+    def _finish(code):
+        (output_dir / "patch_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return code
+
+    if not macro_path.is_file():
+        _log("PATCH FAIL: macro.py missing in this folder. "
+             "Patch needs an existing macro; build once with a "
+             "full run first, then patch from that folder.")
+        return _finish(1)
+    if not (text or "").strip():
+        _log("PATCH FAIL: no modification instructions given.")
+        return _finish(1)
+    macro_text = macro_path.read_text(encoding="utf-8", errors="replace")
+    qa_text = ""
+    qa_path = output_dir / "qa_history.txt"
+    if qa_path.is_file():
+        try:
+            qa_text = qa_path.read_text(encoding="utf-8",
+                                        errors="replace")[-8000:]
+        except OSError:
+            qa_text = ""
+    hist_text = ""
+    hist_path = output_dir / "feature_history.json"
+    if hist_path.is_file():
+        try:
+            hist = json.loads(hist_path.read_text(encoding="utf-8"))
+            fails = [f"{f['feature']} delta {f['delta']}"
+                     for f in hist.get("features", [])
+                     if f.get("verdict") == "FAIL"]
+            hist_text = ("Previous feature-gate FAILs: "
+                         + ("; ".join(fails) if fails else "none"))
+        except Exception:
+            hist_text = ""
+    guidance_text = ""
+    guidance_path = output_dir / "guidance.txt"
+    if guidance_path.is_file():
+        try:
+            guidance_text = guidance_path.read_text(
+                encoding="utf-8", errors="replace")[:2000]
+        except OSError:
+            guidance_text = ""
+    prompt = (
+        "You are editing an EXISTING FreeCAD macro. Do NOT write a "
+        "new macro, do NOT regenerate the whole file, do NOT "
+        "reorder features, do NOT rename features, do NOT change "
+        "any dimension, direction, or sketch except what the "
+        "modification instructions below require. Chamfer/Fillet "
+        "stay LAST in the feature order. If a feature you change "
+        "is in FEATURE_MAP, keep the map entry and update only "
+        "its changed value.\n\n"
+        "Return ONLY one ```json code fence containing a list of "
+        "replacements, no other text:\n"
+        '[{"old": "<EXACT text copied from the macro, including '
+        'indentation>", "new": "<replacement text>"}]\n'
+        "Each \"old\" must occur exactly once in the macro; copy "
+        "enough surrounding lines to make it unique. Keep each "
+        "replacement as small as possible: one feature, one "
+        "direction flip, one value, one position — never the "
+        "whole file.\n\n"
+        f"Modification instructions:\n{text}\n\n"
+        + (f"{hist_text}\n\n" if hist_text else "")
+        + (f"Previous guidance:\n{guidance_text}\n\n" if guidance_text else "")
+        + (f"Q&A history (user-confirmed; do not contradict it):\n"
+           f"{qa_text}\n\n" if qa_text.strip() else "")
+        + "Existing macro.py:\n```python\n" + macro_text + "\n```\n"
+        + f"Save the patched model to {fcstd_path} and the STEP "
+        f"export to {step_path} (the macro already does this; "
+        f"do not change its output paths)."
+    )
+    (output_dir / "patch_prompt.txt").write_text(prompt, encoding="utf-8")
+    if dry_run:
+        _log("PATCH DRY-RUN: prompt written to patch_prompt.txt, "
+             "no API call, no macro change")
+        return _finish(0)
+    api_key = os.environ.get("META_API_KEY") or load_dotenv_key()
+    if not api_key:
+        _log("PATCH FAIL: META_API_KEY is not set (password field "
+             "or local .env)")
+        return _finish(1)
+    try:
+        response_json = call_api(api_key, model, max_tokens,
+                                 [{"role": "user",
+                                   "content": prompt}])
+        content = extract_content(response_json)
+    except RuntimeError as exc:
+        _log(f"PATCH FAIL: API error: {exc}")
+        return _finish(1)
+    # Save FULL raw response BEFORE any extraction.
+    (output_dir / "patch_raw_response.txt").write_text(
+        json.dumps(response_json, indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    replacements, patch_err = extract_patch_replacements(content)
+    if patch_err:
+        _log(f"PATCH FAIL: {patch_err}. Macro untouched.")
+        return _finish(1)
+    new_text, applied, apply_errors = apply_patch_replacements(
+        macro_text, replacements)
+    if apply_errors:
+        _log("PATCH FAIL: replacements did not apply cleanly. "
+             "Macro untouched.")
+        for err in apply_errors:
+            _log(f"  {err}")
+        return _finish(1)
+    hits = safety_check(new_text)
+    if hits:
+        _log(f"PATCH FAIL: safety check failed: {hits}. "
+             "Macro untouched.")
+        return _finish(1)
+    try:
+        ast.parse(new_text)
+    except SyntaxError as exc:
+        _log(f"PATCH FAIL: patched macro has a syntax error: {exc}. "
+             "Macro untouched.")
+        return _finish(1)
+    # Backup BEFORE overwriting, in the SAME folder.
+    try:
+        (output_dir / "macro.prev.py").write_text(macro_text,
+                                                  encoding="utf-8")
+    except OSError:
+        pass
+    for _name, _prev in (("model.fcstd", "model.prev.fcstd"),
+                         ("model.step", "model.prev.step")):
+        _src = output_dir / _name
+        if _src.is_file():
+            try:
+                shutil.copyfile(_src, output_dir / _prev)
+            except OSError:
+                pass
+    macro_path.write_text(new_text, encoding="utf-8")
+    _log(f"PATCH: applied {applied} replacement(s) to macro.py "
+         f"(backup: macro.prev.py)")
+    cleaned = clean_model_outputs(output_dir)
+    if cleaned:
+        _log(f"PATCH: cleaned stale outputs: {cleaned}")
+    run_log = output_dir / "run.log"
+    try:
+        returncode = run_freecadcmd(freecadcmd, macro_path, run_log)
+    except OSError as exc:
+        _log(f"PATCH FAIL: freecadcmd run failed: {exc}")
+        return _finish(1)
+    (output_dir / "run_patch.log").write_text(
+        run_log.read_text(encoding="utf-8", errors="replace"),
+        encoding="utf-8")
+    _log(f"PATCH: freecadcmd exit {returncode}")
+    if returncode != 0:
+        tail = run_log.read_text(encoding="utf-8",
+                                 errors="replace")[-1000:]
+        _log(f"PATCH FAIL: freecadcmd exit {returncode}. Log tail:\n{tail}")
+        _log("Restore the pre-patch macro with: copy macro.prev.py "
+             "over macro.py, then patch again.")
+        return _finish(1)
+    if fcstd_path.is_file() and not step_path.is_file():
+        _log("PATCH: model.fcstd saved but model.step missing; "
+             "exporting STEP from the .fcstd instead of failing.")
+        if export_step_from_fcstd(freecadcmd, fcstd_path, step_path,
+                                  output_dir):
+            _log("PATCH: STEP fallback export succeeded.")
+        else:
+            _log("PATCH FAIL: STEP fallback export failed.")
+            return _finish(1)
+    if not fcstd_path.is_file() or not step_path.is_file():
+        _log(f"PATCH FAIL: output files missing: model.fcstd "
+             f"exists={fcstd_path.is_file()}, model.step "
+             f"exists={step_path.is_file()}")
+        return _finish(1)
+    verification = verify_step(freecadcmd, step_path, output_dir)
+    _log(f"PATCH: verification: {verification}")
+    if not verification.get("ok"):
+        _log("PATCH FAIL: STEP verification snippet failed "
+             "(see verify.log).")
+        return _finish(1)
+    if verification["solids"] != 1 or not verification["valid"]:
+        _log(f"PATCH FAIL: solids must be exactly 1 and valid True; "
+             f"got solids={verification['solids']}, "
+             f"valid={verification['valid']}")
+        return _finish(1)
+    _checks = parse_check_lines(run_log.read_text(encoding="utf-8",
+                                                  errors="replace"))
+    _history = evaluate_feature_history(_checks)
+    if _history:
+        (output_dir / "feature_history.json").write_text(
+            json.dumps({"attempt": "patch", "features": _history},
+                       indent=2, ensure_ascii=False), encoding="utf-8")
+        _log("PATCH: feature history:\n" + feature_history_report(_history))
+        _failed = [r for r in _history if r["verdict"] == "FAIL"]
+        if _failed:
+            _log("PATCH FAIL: feature volume gate FAIL: "
+                 + "; ".join(f"{r['feature']} delta {r['delta']} "
+                             f"({r['reason']})" for r in _failed)
+                 + ". Patch again with only those features changed; "
+                 "no auto-retry is run in patch mode.")
+            return _finish(1)
+    report_lines = [
+        "Drawing-to-Parametric-CAD orchestrator v0.1",
+        "PATCH MODE: existing macro.py patched in place, 1 API call, "
+        "1 freecadcmd run, no new folder, no regeneration.",
+        f"PATCH: applied {applied} replacement(s).",
+        f"PATCH verification: {verification}",
+        "RESULT: PATCH COMPLETE",
+    ]
+    write_report(output_dir / "report.txt", report_lines)
+    _log("RESULT: PATCH COMPLETE")
+    return _finish(0)
+
+
 def append_log(path, text):
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(text + "\n")
@@ -3113,6 +3475,20 @@ def parse_args(argv=None):
                         "and report.txt are never changed. Needs only "
                         "--output-dir (+ --freecadcmd); with --dry-run "
                         "it writes remap_prompt.txt and calls no API.")
+    parser.add_argument("--patch", action="store_true",
+                        help="Patch an existing result folder's macro.py "
+                        "in place instead of regenerating it: one "
+                        "text-only LLM call returns only JSON "
+                        "replacements for the parts --text requires, "
+                        "they are applied all-or-nothing to macro.py "
+                        "(backup macro.prev.py in the same folder), "
+                        "then freecadcmd runs ONCE and the STEP is "
+                        "verified (feature volume gate still applies, "
+                        "but there is no auto-retry). Needs only "
+                        "--output-dir (+ --freecadcmd) and --text; "
+                        "no drawing, no image, no new folder. With "
+                        "--dry-run it writes patch_prompt.txt and "
+                        "calls no API.")
     return parser.parse_args(argv)
 
 
@@ -3138,8 +3514,11 @@ def main(argv=None):
     if args.remap:
         return run_remap_mode(output_dir, args.freecadcmd, args.model,
                               args.max_tokens, args.dry_run)
+    if args.patch:
+        return run_patch_mode(output_dir, args.freecadcmd, args.model,
+                              args.max_tokens, args.text, args.dry_run)
     if not args.drawing:
-        die("--drawing is required unless --measure, --inspect, or --remap is given.")
+        die("--drawing is required unless --measure, --inspect, --remap, or --patch is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():

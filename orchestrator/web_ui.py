@@ -441,34 +441,31 @@ S = {
     "continue_title": ("▶ Continue this project",
                         "▶ 이 프로젝트 이어서 작업"),
     "continue_note": ("Write new instructions below and press Continue "
-                      "work: the drawing/outline and Q&A history from "
-                      "this result are reused, and the work continues "
-                      "in THIS folder (simple modification only, no "
-                      "new folder is created). The previous model is "
-                      "kept as model.prev.fcstd / model.prev.step in "
-                      "the same folder, then overwritten by the new "
-                      "model.",
-                      "아래에 새 지시를 적고 계속 작업을 누르면, 이 "
-                      "결과의 도면/윤곽/Q&A 내역이 재사용되고, 이 폴더에서 "
-                      "간단 수정만 진행됩니다. 새 폴더는 만들지 않습니다. "
-                      "이전 모델은 같은 폴더에 model.prev.fcstd / "
-                      "model.prev.step으로 남겨두고, 새 모델이 덮어씁니다."),
+                      "work: the EXISTING macro.py in THIS folder is "
+                      "patched only where your instructions require "
+                      "(1 API call, 1 FreeCAD run, no new folder, no "
+                      "regeneration). The previous macro/model are "
+                      "kept as macro.prev.py / model.prev.fcstd / "
+                      "model.prev.step in the same folder.",
+                      "아래에 새 지시를 적고 계속 작업을 누르면, 이 폴더의 "
+                      "기존 macro.py를 지시한 부분만 고칩니다 (API 1번, "
+                      "FreeCAD 1번, 새 폴더 없음, 전체 재생성 없음). "
+                      "이전 매크로/모델은 같은 폴더에 macro.prev.py / "
+                      "model.prev.fcstd / model.prev.step으로 남습니다."),
     "continue_label": ("New instructions", "새 지시"),
     "answer_title": ("✏️ Answer questions and continue work",
                     "✏️ 질문에 답하고 계속 작업"),
     "answer_note": ("Write your answers below and press Continue work: "
-                    "the drawing/outline are taken automatically from "
-                    "this result, and the full Q&A history so far is "
-                    "included automatically, so write only the new "
-                    "answers. The work continues in THIS folder "
-                    "(simple modification only, no new folder is "
-                    "created); the accumulated Q&A is updated in this "
-                    "folder's qa_history.txt.",
-                    "아래에 답을 적고 계속 작업을 누르면, 도면/윤곽은 이 "
-                    "결과에서 자동으로 가져오고 지금까지의 Q&A 내역도 "
-                    "자동으로 포함되니 새 답변만 적으면 됩니다. 이 폴더에서 "
-                    "간단 수정만 진행됩니다. 새 폴더는 만들지 않고, 누적된 "
-                    "Q&A는 이 폴더의 qa_history.txt에 업데이트됩니다."),
+                    "write only the new answers. The EXISTING macro.py "
+                    "in THIS folder is patched only where your "
+                    "answers require (1 API call, 1 FreeCAD run, no "
+                    "new folder, no regeneration); the accumulated "
+                    "Q&A is updated in this folder's qa_history.txt.",
+                    "아래에 답을 적고 계속 작업을 누르면, 새 답변만 적으면 "
+                    "됩니다. 이 폴더의 기존 macro.py를 답변에 필요한 부분만 "
+                    "고칩니다 (API 1번, FreeCAD 1번, 새 폴더 없음, 전체 "
+                    "재생성 없음). 누적된 Q&A는 이 폴더의 qa_history.txt에 "
+                    "업데이트됩니다."),
     "answer_label": ("Answers (one per question)",
                      "답변 (질문별로 적으세요)"),
     "key_note": ("Key is not stored, used only for this run. Empty "
@@ -479,14 +476,13 @@ S = {
     "dry_label": ("dry-run (assemble the prompt only)",
                   "dry-run (프롬프트 조립만 확인)"),
     "continue_button": ("▶ Continue work", "▶ 계속 작업"),
-    "continue_button_note": ("Continue work reuses this work's history "
-                             "(drawing, outline, Q&A history, numbered "
-                             "dimensions) and modifies the model in "
-                             "THIS folder only. No new folder is "
-                             "created.",
-                             "계속 작업은 이 작업의 히스토리(도면, 윤곽, "
-                             "Q&A 내역, 번호 도면)를 가지고 이 폴더에서만 "
-                             "간단 수정합니다. 새 폴더는 만들지 않습니다."),
+    "continue_button_note": ("Continue work patches the existing macro.py "
+                             "in THIS folder only where your instructions "
+                             "require (1 API call, 1 FreeCAD run). No "
+                             "new folder, no regeneration.",
+                             "계속 작업은 이 폴더의 기존 macro.py를 지시한 "
+                             "부분만 고칩니다 (API 1번, FreeCAD 1번). 새 "
+                             "폴더도, 전체 재생성도 없습니다."),
     "report_title": ("report.txt", "report.txt"),
     "report_none": ("(none)", "(없음)"),
     "guidance_title": ("guidance.txt", "guidance.txt"),
@@ -2333,6 +2329,14 @@ class Handler(BaseHTTPRequestHandler):
                     except OSError:
                         pass
             fields["output_dir"] = str(prev_dir)
+            # Patch mode (Oct 31, 2026 user instruction): a
+            # modification request patches the EXISTING macro.py
+            # in this folder, it does not regenerate it. When a
+            # macro exists, the shared /run logic below builds a
+            # --patch command instead of a full build command.
+            # No macro (ask-first, no model yet) -> full build.
+            fields["patch_mode"] = ("1" if (prev_dir / "macro.py").is_file()
+                                    else "0")
             # Accumulate the FULL Q&A trail. Until now only the
             # immediate previous questions + new answers went into
             # the prompt, so earlier rounds' answers were lost and
@@ -2369,6 +2373,12 @@ class Handler(BaseHTTPRequestHandler):
                 _entry = "Ask-first step asked no questions. Build now."
             qa_trail = ((prev_history + "\n" if prev_history else "")
                         + _entry)
+            # Patch mode needs ONLY the new instructions, not the
+            # full trail: run_patch_mode already reads
+            # qa_history.txt from the folder itself, and sending
+            # the whole trail twice would waste the time patch
+            # mode exists to save.
+            fields["patch_text"] = _entry
             fields["notes"] = (
                 "Q&A history (all previous questions and answers, "
                 "in order):\n" + qa_trail
@@ -2411,33 +2421,53 @@ class Handler(BaseHTTPRequestHandler):
         else:
             output_dir = resolve_run_output_dir(fields.get("output_dir", ""))
         output_dir.mkdir(parents=True, exist_ok=True)
-        original_name, drawing_bytes = files["drawing"]
-        suffix = Path(original_name).suffix or ".png"
-        input_path = output_dir / f"input_drawing{suffix}"
-        input_path.write_bytes(drawing_bytes)
+        patch_mode = fields.get("patch_mode") == "1"
+        if patch_mode:
+            # Patch: no drawing re-upload, no image, no full
+            # rebuild. One text-only LLM call returns only JSON
+            # replacements for macro.py in this same folder, then
+            # freecadcmd runs once. See run_pipeline --patch.
+            patch_text = (fields.get("patch_text", "").strip()
+                          or fields.get("notes", "").strip())
+            command = [
+                sys.executable,
+                str(RUN_PIPELINE),
+                "--patch",
+                "--output-dir", str(output_dir),
+                "--freecadcmd", fields.get("freecadcmd", "freecadcmd") or "freecadcmd",
+            ]
+            if patch_text:
+                command += ["--text", patch_text]
+            if dry_run:
+                command.append("--dry-run")
+        else:
+            original_name, drawing_bytes = files["drawing"]
+            suffix = Path(original_name).suffix or ".png"
+            input_path = output_dir / f"input_drawing{suffix}"
+            input_path.write_bytes(drawing_bytes)
 
-        command = [
-            sys.executable,
-            str(RUN_PIPELINE),
-            "--drawing", str(input_path),
-            "--output-dir", str(output_dir),
-            "--freecadcmd", fields.get("freecadcmd", "freecadcmd") or "freecadcmd",
-        ]
-        if "outline" in files and files["outline"][1]:
-            outline_name, outline_bytes = files["outline"]
-            outline_suffix = Path(outline_name).suffix or ".bin"
-            outline_path = output_dir / f"input_outline{outline_suffix}"
-            outline_path.write_bytes(outline_bytes)
-            command += ["--outline", str(outline_path)]
-        notes = fields.get("notes", "").strip()
-        if notes:
-            command += ["--text", notes]
-        if fields.get("gear") == "on":
-            command.append("--gear")
-        if ask_first:
-            command.append("--ask-first")
-        if dry_run:
-            command.append("--dry-run")
+            command = [
+                sys.executable,
+                str(RUN_PIPELINE),
+                "--drawing", str(input_path),
+                "--output-dir", str(output_dir),
+                "--freecadcmd", fields.get("freecadcmd", "freecadcmd") or "freecadcmd",
+            ]
+            if "outline" in files and files["outline"][1]:
+                outline_name, outline_bytes = files["outline"]
+                outline_suffix = Path(outline_name).suffix or ".bin"
+                outline_path = output_dir / f"input_outline{outline_suffix}"
+                outline_path.write_bytes(outline_bytes)
+                command += ["--outline", str(outline_path)]
+            notes = fields.get("notes", "").strip()
+            if notes:
+                command += ["--text", notes]
+            if fields.get("gear") == "on":
+                command.append("--gear")
+            if ask_first:
+                command.append("--ask-first")
+            if dry_run:
+                command.append("--dry-run")
 
         # The key travels ONLY in this subprocess environment, never
         # on the command line, never in a log, never on a result page.
