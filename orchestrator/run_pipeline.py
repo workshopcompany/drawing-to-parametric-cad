@@ -749,6 +749,117 @@ def classify_diagnosis(diagnosis_text):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Feature history + per-feature volume gate (Oct 31, 2026, 140309 run).
+# Root cause found in that run: the final STEP gate (solids==1, valid)
+# passes even when a Pocket cuts air. check_feature() in the macro
+# only checks solids/valid, so Flat / Recess / Bore / Tap-Clear
+# pockets with volume delta exactly 0 still printed PASS, and the
+# run was declared MODELING COMPLETE with no bore, no flat and no
+# recess in the actual shape. The matching table then read the
+# sketch diameter (intended value) and reported O for the bore.
+#
+# This gate is mechanical and drawing-independent: it parses the
+# CHECK lines the macro already prints (feature, solids, valid,
+# volume), computes the volume delta per feature in order, and
+# verdicts each feature from that delta -- never from the LLM's
+# own PASS claim. A Pocket must remove material, a Pad must add
+# material. A 0-delta Pocket is a direction failure, full stop.
+#
+# The resulting records are written to feature_history.json and
+# carried into the next attempt's prompt verbatim. That is the
+# conversation-like history: OK features are locked (copy them
+# exactly, do not re-guess them), FAIL features are changed only,
+# and a direction that already gave delta 0 for a feature must
+# never be repeated. If a feature later proves wrong, its verdict
+# is flipped OK -> FAIL with a new reason; records are never
+# silently overwritten, so the retry cannot oscillate.
+#
+# Limitation, stated plainly: a volume delta alone cannot catch a
+# pocket that cuts the wrong place with the right volume (the
+# 140309 tap threads cut outward with the same -24 mm^3 as the
+# correct inward cut). That needs a STEP face-position check, which
+# is NOT part of this change; volume + history is the first gate,
+# not the whole drawing comparison.
+_CHECK_RE = re.compile(
+    r"CHECK\s+(\S+)\s+solids=(\d+)\s+valid=(\w+)\s+vol=([0-9.]+)")
+
+
+def parse_check_lines(run_log_text):
+    """Parse macro CHECK lines, first occurrence per feature, in order."""
+    checks, seen = [], set()
+    for match in _CHECK_RE.finditer(run_log_text or ""):
+        name = match.group(1)
+        if name in seen:
+            continue
+        seen.add(name)
+        checks.append({
+            "feature": name,
+            "solids": int(match.group(2)),
+            "valid": match.group(3) == "True",
+            "volume": float(match.group(4)),
+        })
+    return checks
+
+
+def evaluate_feature_history(checks):
+    """Verdict each feature from its volume delta vs the previous one.
+
+    Pad: delta must be > 0.01. Pocket: delta must be < -0.01.
+    Chamfer: only validity gates it (a concave chamfer can legitimately
+    add volume, so volume direction is not a gate for chamfers).
+    Any other feature: solids==1 and valid.
+    Returns records with volume_before, delta, verdict, reason.
+    """
+    records, prev_vol = [], 0.0
+    for check in checks:
+        vol, delta = check["volume"], check["volume"] - prev_vol
+        prev_vol = vol
+        name = check["feature"]
+        if not check["valid"] or check["solids"] != 1:
+            verdict, reason = "FAIL", "solids/valid check failed"
+        elif name.startswith("Pad"):
+            verdict = "OK" if delta > 0.01 else "FAIL"
+            reason = ("" if verdict == "OK" else
+                      "Pad volume did not increase - pad cut air or "
+                      "sketch is not on material")
+        elif name.startswith("Pocket"):
+            verdict = "OK" if delta < -0.01 else "FAIL"
+            reason = ("" if verdict == "OK" else
+                      "Pocket volume unchanged (0-cut) - direction "
+                      "likely reversed; flip Reversed for this Pocket "
+                      "only, do not change its dimensions")
+        elif name.startswith("Chamfer"):
+            verdict = "OK" if check["valid"] else "FAIL"
+            reason = ("" if verdict == "OK" else
+                      "Chamfer made the solid invalid - drop this "
+                      "Chamfer feature, do not keep an invalid solid "
+                      "for a finishing chamfer")
+        else:
+            verdict, reason = "OK", ""
+        records.append({
+            "feature": name, "solids": check["solids"],
+            "valid": check["valid"], "volume": vol,
+            "volume_before": round(vol - delta, 4),
+            "delta": round(delta, 4), "verdict": verdict,
+            "reason": reason,
+        })
+    return records
+
+
+def feature_history_report(records):
+    """Compact one-line-per-feature history, for logs and prompts."""
+    lines = []
+    for rec in records:
+        line = (f"{rec['feature']}: vol {rec['volume_before']} -> "
+                f"{rec['volume']} delta {rec['delta']} "
+                f"verdict {rec['verdict']}")
+        if rec["reason"]:
+            line += f" reason: {rec['reason']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def build_diagnosis(run_log_text="", verification=None, last_error="",
                     fcstd_path=None):
     """Build a structured diagnosis from the ACTUAL artifact.
@@ -3198,6 +3309,7 @@ def main(argv=None):
     # a safety/API failure is never diagnosed from an older run's log.
     prev_run_log_text = ""
     prev_verification = None
+    prev_feature_history = []
     prev_ran = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
         append_log(self_fix_log,
@@ -3228,11 +3340,23 @@ def main(argv=None):
             retry_prompt = build_prompt(
                 principles_text, gear_text, args.text, output_dir,
                 outline_text, reference_text=reference_text)
+            _hist_text = (feature_history_report(prev_feature_history)
+                          if prev_feature_history else
+                          "no CHECK lines recorded")
             prompt_text = (
                 retry_prompt
                 + "\n\nPrevious attempt failed with this exact error:\n"
                 + last_error
                 + "\n" + last_diagnosis["report"]
+                + "\nFeature history (pipeline-measured from CHECK "
+                + "volumes, not the LLM's own PASS claims):\n"
+                + _hist_text
+                + "\nKeep every OK feature exactly as it was (same "
+                + "direction, same dimensions, same sketch). Change "
+                + "ONLY FAIL features. Do not repeat a direction that "
+                + "already gave delta 0 for that feature. If a feature "
+                + "already failed with both Reversed values, ask a "
+                + "question instead of guessing again."
                 + "\nFix ONLY the code/API error described above. "
                 + "Do not change any dimension, outline, angle, or "
                 + "user-confirmed answer. Do not drop any Q-lines or "
@@ -3248,6 +3372,7 @@ def main(argv=None):
             # Reset previous-attempt artifacts for this attempt.
             prev_run_log_text = ""
             prev_verification = None
+            prev_feature_history = []
             prev_ran = False
         # Stale-output guard: delete any previous attempt's model
         # outputs BEFORE this attempt, so verification below can
@@ -3413,6 +3538,36 @@ def main(argv=None):
             )
             append_log(self_fix_log, f"Attempt {attempt}: {last_error}")
             continue
+
+        # Per-feature volume gate (see evaluate_feature_history).
+        # This runs AFTER the STEP gate and BEFORE any MODELING
+        # COMPLETE declaration, so a final solid that is 1 + valid
+        # can still fail when a Pocket cut air. Macros without
+        # CHECK lines skip this gate (no false failure for them).
+        _checks = parse_check_lines(run_log.read_text(
+            encoding="utf-8", errors="replace"))
+        _history = evaluate_feature_history(_checks)
+        prev_feature_history = _history
+        if _history:
+            (output_dir / "feature_history.json").write_text(
+                json.dumps({"attempt": attempt, "features": _history},
+                           indent=2, ensure_ascii=False), encoding="utf-8")
+            append_log(self_fix_log,
+                       f"Attempt {attempt}: feature history:\n"
+                       + feature_history_report(_history))
+            _failed = [r for r in _history if r["verdict"] == "FAIL"]
+            if _failed:
+                last_error = (
+                    "Feature volume gate FAIL: "
+                    + "; ".join(
+                        f"{r['feature']} delta {r['delta']} "
+                        f"({r['reason']})" for r in _failed)
+                    + ". A macro log PASS alone is not a pass; a "
+                    "Pocket with delta 0 cut air."
+                )
+                append_log(self_fix_log,
+                           f"Attempt {attempt}: {last_error}")
+                continue
 
         # MODELING COMPLETE (not "success"): the only gate passed
         # here is solids == 1 and valid True on the STEP file.
