@@ -287,6 +287,20 @@ S = {
                      "추가합니다. 실측값에는 판정이 없습니다. 도면값과 "
                      "직접 비교하세요."),
     "measure_done": ("Measured.", "실측 완료."),
+    "inspect_btn": ("Feature check", "특징 검사"),
+    "inspect_note": ("Check every mapped feature against the current "
+                     ".fcstd + STEP, without rebuilding and without "
+                     "failing the run. Misses are kept as history and "
+                     "carried into the next Continue work.",
+                     "현재 .fcstd + STEP에 대해 매핑된 특징을 검사합니다. "
+                     "다시 만들지 않고, 실패로 처리하지도 않습니다. 빠진 "
+                     "특징은 이력으로 남아 다음 계속 작업에 같이 들어갑니다."),
+    "inspect_title": ("Feature check", "특징 검사"),
+    "inspect_history_title": ("Feature-check history", "특징 검사 이력"),
+    "err_inspect_failed": ("Feature check failed. See web_ui_inspect.log "
+                           "in the folder.",
+                           "특징 검사에 실패했습니다. 폴더의 "
+                           "web_ui_inspect.log를 보세요."),
     "err_measure_nostep": ("No model.step in this folder to measure.",
                            "이 폴더에 실측할 model.step이 없습니다."),
     "err_measure_failed": ("Measurement failed. See web_ui_measure.log and "
@@ -1602,6 +1616,47 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # Real-measurement (실측) form: runs measure_step.py on this
     # folder's model.step and adds a Measured column to the table.
     # No API call, no rebuild. Only shown when a STEP exists.
+    # Feature-check (separate button, not a gate): latest
+    # feature_check.txt + append-only history, if any. Never a
+    # failure: a miss only lists what the next Continue run must
+    # add, and the model/report are untouched by the check itself.
+    inspect_text = ""
+    inspect_file = output_dir / "feature_check.txt"
+    if inspect_file.is_file():
+        try:
+            inspect_text = inspect_file.read_text(encoding="utf-8",
+                                                  errors="replace")
+        except OSError:
+            inspect_text = ""
+    inspect_history = ""
+    inspect_hist_file = output_dir / "feature_check_history.txt"
+    if inspect_hist_file.is_file():
+        try:
+            inspect_history = inspect_hist_file.read_text(
+                encoding="utf-8", errors="replace")
+        except OSError:
+            inspect_history = ""
+    inspect_block = ""
+    if (output_dir / "model.step").is_file():
+        inspect_block = (
+            f"<form action=\"/inspect\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"dir\" value=\"{html.escape(str(output_dir))}\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<label>freecadcmd <input type=\"text\" name=\"freecadcmd\" "
+            f"value=\"freecadcmd\"></label> "
+            f"<button class=\"btn\" type=\"submit\">"
+            f"{tr(lang, 'inspect_btn')}</button></form>"
+            f"<p class=\"note\">{tr(lang, 'inspect_note')}</p>")
+    inspect_card = ""
+    if inspect_text or inspect_history:
+        _hist = (f"<h4>{tr(lang, 'inspect_history_title')}</h4>"
+                 f"<pre>{html.escape(inspect_history)}</pre>"
+                 if inspect_history else "")
+        inspect_card = (
+            f"<div class=\"card\"><h3>🔍 {tr(lang, 'inspect_title')}</h3>"
+            f"<pre>{html.escape(inspect_text)}</pre>{_hist}</div>")
+
     measure_block = ""
     step_path = output_dir / "model.step"
     if step_path.is_file():
@@ -1684,6 +1739,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <p class="note">{tr(lang, 'matching_note')}</p>
       {export_open}{matching_table}{export_close}
       {measure_block}
+      {inspect_block}
+      {inspect_card}
       <p class="note">{tr(lang, 'matching_legend')}</p>
       <p class="note">{tr(lang, 'matching_disclaimer')}</p></div>
     </div>
@@ -1878,7 +1935,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect"):
             self.send_error(404, "Not found")
             return
         try:
@@ -1936,6 +1993,47 @@ class Handler(BaseHTTPRequestHandler):
                     timeout=3600, env=measure_env)
             if result.returncode != 0:
                 data = error_page(tr(lang, "err_measure_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/inspect":
+            # Feature check: no API call, no rebuild, never a
+            # failure gate. Runs run_pipeline.py --inspect on the
+            # folder, then shows the result page with the checklist
+            # + history. The model, macro, and report are untouched.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            if not (output_dir / "model.step").is_file():
+                data = error_page(tr(lang, "err_measure_nostep"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--inspect",
+                       "--output-dir", str(output_dir),
+                       "--freecadcmd", freecadcmd_value]
+            log_path = output_dir / "web_ui_inspect.log"
+            inspect_env = dict(os.environ)
+            inspect_env["PYTHONUTF8"] = "1"
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=inspect_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_inspect_failed"), lang=lang)
                 self._send_html(400, data)
                 return
             data = result_page(output_dir, 0, lang=lang)
@@ -2138,6 +2236,11 @@ class Handler(BaseHTTPRequestHandler):
             if prev_history_path.is_file():
                 prev_history = prev_history_path.read_text(
                     encoding="utf-8", errors="replace").strip()
+            prev_feature_history = ""
+            prev_feature_hist_path = prev_dir / "feature_check_history.txt"
+            if prev_feature_hist_path.is_file():
+                prev_feature_history = prev_feature_hist_path.read_text(
+                    encoding="utf-8", errors="replace").strip()
             prev_guidance = ""
             prev_guidance_path = prev_dir / "guidance.txt"
             if prev_guidance_path.is_file():
@@ -2162,6 +2265,10 @@ class Handler(BaseHTTPRequestHandler):
                 "in order):\n" + qa_trail
                 + ("\nNumbered drawing dimensions:\n" + prev_dims_text
                    if prev_dims_text else "")
+                + ("\nFeature-check history (previous inspections; "
+                   "these misses must be fixed in this build, not "
+                   "repeated):\n" + prev_feature_history
+                   if prev_feature_history else "")
                 + f"\n(Previous run folder: {prev_dir.name})")
 
         dry_run = fields.get("dry_run") == "on"
@@ -2247,7 +2354,8 @@ class Handler(BaseHTTPRequestHandler):
                         qa_trail + "\n", encoding="utf-8")
                 except OSError:
                     pass
-            for _name in ("dimensions.json", "drawing_numbered.png"):
+            for _name in ("dimensions.json", "drawing_numbered.png",
+                         "feature_check_history.txt"):
                 _src = prev_dir / _name
                 _dst = output_dir / _name
                 if _src.is_file() and not _dst.is_file():

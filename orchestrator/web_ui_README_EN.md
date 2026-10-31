@@ -282,3 +282,12 @@ Rows without a measurement show ? in the measured verdict.
   containing code or prose is replaced by a warning, and it does
   not drive the ❓ banner. The full response stays in guidance.txt /
   raw_response.txt.
+
+## Feature check button (NOT a failure gate)
+- The "Feature check" button on the matching tab inspects the
+  current model without rebuilding it. The checklist + history
+  are shown on the same tab; the model and report are untouched.
+- Continue work carries the previous feature-check history
+  (feature_check_history.txt) into the next run's prompt alongside
+  the Q&A history, and copies the history file into the new folder
+  so it keeps accumulating.

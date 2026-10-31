@@ -148,3 +148,8 @@ macro.py가 없는 폴더는 예전 행을 유지하고, 검증 실패가 좋은
 - questions.txt는 `write_questions()`로만 쓰고, 검증된 `Q숫자:` 줄만 들어간다. 코드, 일반 글, 응답 전체는 절대 여기에 쓰지 않는다 (raw_response.txt / guidance.txt에 남는다).
 - fence 없는 매크로도 코드로 취급한다: `looks_like_question()`은 FreeCAD 코드 흔적이 있으면 질문이 아니라고 판단하고, `extract_macro()`는 fence 없는 코드도 매크로로 추출한다. 예전에는 fence 없는 매크로가 `QUESTION:` 로그 문자열과 `?` 때문에 디자인 질문으로 오판돼 전체가 questions.txt에 들어갔다.
 - 새 실행 시작 때 questions.txt를 지우고, 질문 없는 최종 시도는 이전 시도의 questions.txt를 삭제한다. 오래된 파일이 배너를 끌고 다니지 않는다.
+
+## 특징 검사 (--inspect, 실패 게이트 아님)
+- 기존 결과 폴더를 다시 만들지 않고 검사만 한다: 현재 .fcstd + STEP을 새로 검증하고, 매칭표 + FEATURE_MAP과 대조해 feature_check.txt/.json을 쓰고, feature_check_history.txt에 한 줄 요약(OK/MISS/DIFF/?/REF + 빠진 목록)을 추가한다.
+- 검사가 빠짐을 찾아도 종료 코드는 0이고, 모델/매크로/report.txt는 바꾸지 않는다. 빠짐은 "다음 Continue에서 고칠 목록"이지 "실패해서 버릴 모델"이 아니다.
+- MISS는 모델링값이 없거나 .fcstd에 특징이 없는 경우, DIFF는 값은 있는데 도면값과 다른 경우(도면 오독일 수도 있음), REF는 공차/일반 챔퍼 같은 비형상 행이다.

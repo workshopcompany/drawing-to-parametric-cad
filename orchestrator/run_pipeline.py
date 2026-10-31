@@ -2228,6 +2228,165 @@ def run_measure_mode(output_dir, freecadcmd):
     return 0
 
 
+def run_inspect_mode(output_dir, freecadcmd):
+    """Feature inspection for an existing result folder (separate button).
+
+    NOT a gate, NOT a rebuild, NOT a failure: this mode only READS
+    the current model (fresh STEP verification + .fcstd feature
+    dump) and compares it with the folder's matching table and
+    FEATURE_MAP. It writes feature_check.txt (human-readable) and
+    feature_check.json (structured), appends ONE compact entry to
+    feature_check_history.txt, and always returns 0 when the folder
+    exists -- even when checks MISS. A miss means "this feature is
+    not in the model yet, fix it in the next Continue run", never
+    "this run failed, throw the model away". It never touches
+    model.fcstd, model.step, macro.py, or report.txt.
+    History: feature_check_history.txt is append-only and is
+    copied forward by the web UI's Continue work, so the next
+    build's prompt carries every previous inspection's misses.
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    step_path = output_dir / "model.step"
+    fcstd_path = output_dir / "model.fcstd"
+    matching_path = output_dir / "matching.json"
+    mapping_path = output_dir / "mapping.json"
+    rows = []
+    if matching_path.is_file():
+        try:
+            rows = json.loads(matching_path.read_text(encoding="utf-8"))
+        except Exception:
+            rows = []
+    mapping = None
+    if mapping_path.is_file():
+        try:
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+        except Exception:
+            mapping = None
+    verification = None
+    if step_path.is_file():
+        try:
+            verification = verify_step(freecadcmd, step_path, output_dir)
+        except Exception:
+            verification = None
+    features_data = None
+    by_name = {}
+    if fcstd_path.is_file():
+        try:
+            features_data = run_read_features(freecadcmd, fcstd_path,
+                                              output_dir)
+            if features_data is not None:
+                by_name = _features_by_name(features_data)
+        except Exception:
+            features_data = None
+    checks = []
+    missing = []
+    diffs = []
+    counts = {"OK": 0, "MISS": 0, "DIFF": 0, "?": 0, "REF": 0}
+    for row in rows:
+        no = str(row.get("no", ""))
+        if not re.match(r"D\d+$", no):
+            continue
+        item = str(row.get("item", ""))
+        drawing = row.get("drawing")
+        modeling = row.get("modeling")
+        result = str(row.get("result", ""))
+        measured = row.get("measured")
+        meas_result = row.get("measured_result")
+        entry = (mapping or {}).get(no) if mapping is not None else None
+        feature = entry.get("feature") if isinstance(entry, dict) else None
+        in_fcstd = feature in by_name if feature else None
+        low_item = item.lower()
+        if result == "? (참조치수)" or "tolerance" in low_item or \
+                "general chamfer" in low_item:
+            # Notes/rules, not geometry: never a miss, never a diff.
+            status = "REF"
+        elif modeling is None:
+            status = "MISS"
+        elif result == "X":
+            # Value present but different: could be a wrong build
+            # OR a drawing misread (e.g. gear D1 21 vs true 22).
+            # Listed separately from MISS (feature absent), so the
+            # history does not claim a present feature is missing.
+            status = "DIFF"
+        elif result == "O":
+            status = "OK"
+        else:
+            status = "?"
+        # A mapped feature that is not in the .fcstd dump at all is
+        # a miss even if an old modeling value happens to look right.
+        if feature and in_fcstd is False and status in ("OK", "DIFF"):
+            status = "MISS"
+        counts[status] = counts.get(status, 0) + 1
+        checks.append({"no": no, "item": item, "drawing": drawing,
+                       "modeling": modeling, "result": result,
+                       "measured": measured,
+                       "measured_result": meas_result,
+                       "feature": feature, "feature_in_fcstd": in_fcstd,
+                       "check": status})
+        if status == "MISS":
+            missing.append(f"{no} {item} (drawing {drawing}, "
+                           f"modeling {modeling}, feature {feature})")
+        elif status == "DIFF":
+            diffs.append(f"{no} {item} (drawing {drawing}, "
+                         f"modeling {modeling}, feature {feature})")
+    model_info = {}
+    if verification and verification.get("ok"):
+        model_info = {"solids": verification.get("solids"),
+                      "valid": verification.get("valid"),
+                      "volume": verification.get("volume"),
+                      "size_x": verification.get("size_x"),
+                      "size_y": verification.get("size_y"),
+                      "size_z": verification.get("size_z"),
+                      "cyl_diams": verification.get("cyl_diams")}
+    else:
+        model_info = {"solids": None, "valid": None,
+                      "note": "STEP verification unavailable"}
+    payload = {"inspected_at": stamp, "folder": output_dir.name,
+               "model": model_info, "mapping_present": mapping is not None,
+               "features_in_fcstd": sorted(by_name.keys()),
+               "checks": checks, "missing": missing, "diffs": diffs, "counts": counts}
+    (output_dir / "feature_check.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    lines = [f"Feature check {stamp} (folder {output_dir.name})",
+             f"Model: solids={model_info.get('solids')} "
+             f"valid={model_info.get('valid')} "
+             f"volume={model_info.get('volume')} "
+             f"size X={model_info.get('size_x')} "
+             f"Y={model_info.get('size_y')} Z={model_info.get('size_z')}",
+             f"Counts: OK {counts['OK']}, MISS {counts['MISS']}, "
+             f"DIFF {counts['DIFF']}, ? {counts['?']}, REF {counts['REF']}",
+             f"Missing ({len(missing)}):"]
+    lines += [f"  - {m}" for m in missing] or ["  - none"]
+    lines.append(f"Differs from drawing ({len(diffs)}):")
+    lines += [f"  - {m}" for m in diffs] or ["  - none"]
+    lines.append("Checks:")
+    for c in checks:
+        lines.append(f"  [{c['check']}] {c['no']} {c['item']} | "
+                     f"drawing {c['drawing']} | modeling {c['modeling']} "
+                     f"({c['result']}) | measured {c['measured']} "
+                     f"({c['measured_result']}) | "
+                     f"feature {c['feature']} in_fcstd={c['feature_in_fcstd']}")
+    (output_dir / "feature_check.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8")
+    hist_entry = (f"--- {stamp} ---\n"
+                  f"PASS {counts['OK']}, MISS {counts['MISS']}, "
+                  f"DIFF {counts['DIFF']}, ? {counts['?']}, "
+                  f"REF {counts['REF']}\n"
+                  f"Missing: {'; '.join(missing) if missing else 'none'}\n"
+                  f"Differs: {'; '.join(diffs) if diffs else 'none'}\n")
+    try:
+        with open(output_dir / "feature_check_history.txt", "a",
+                  encoding="utf-8") as f:
+            f.write(hist_entry)
+    except OSError:
+        pass
+    print(f"Feature check {stamp}: OK {counts['OK']}, "
+          f"MISS {counts['MISS']}, DIFF {counts['DIFF']}, "
+          f"? {counts['?']} "
+          f"(see feature_check.txt; model unchanged, not a failure)")
+    return 0
+
+
 def verify_step(freecadcmd, step_path, output_dir):
     """Independent STEP check. Returns a dict of measured values.
 
@@ -2399,6 +2558,17 @@ def parse_args(argv=None):
                         "and add a measured column to matching.json. "
                         "Needs only --output-dir (+ --freecadcmd); no "
                         "drawing, no API call.")
+    parser.add_argument("--inspect", action="store_true",
+                        help="Inspect an existing result folder instead of "
+                        "building: check every FEATURE_MAP / matching "
+                        "feature against the current .fcstd + STEP, "
+                        "write feature_check.txt/.json, and append a "
+                        "compact entry to feature_check_history.txt. "
+                        "NEVER a failure gate: it returns 0 even when "
+                        "checks miss, and it never rebuilds or changes "
+                        "the model, macro, or report.txt. Needs only "
+                        "--output-dir (+ --freecadcmd); no drawing, "
+                        "no API call.")
     return parser.parse_args(argv)
 
 
@@ -2419,8 +2589,10 @@ def main(argv=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.measure:
         return run_measure_mode(output_dir, args.freecadcmd)
+    if args.inspect:
+        return run_inspect_mode(output_dir, args.freecadcmd)
     if not args.drawing:
-        die("--drawing is required unless --measure is given.")
+        die("--drawing is required unless --measure or --inspect is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():

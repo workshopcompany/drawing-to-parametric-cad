@@ -224,3 +224,16 @@ modeling-based Result.
 - A new run starts with no questions.txt, and a clean final attempt
   deletes any earlier attempt's questions.txt, so a stale file can
   never drive the banner.
+
+## Feature check (--inspect, NOT a failure gate)
+- Inspects an existing result folder without rebuilding it: fresh
+  STEP verification + .fcstd feature dump against the matching
+  table + FEATURE_MAP, writing feature_check.txt/.json and
+  appending one compact entry to feature_check_history.txt.
+- A miss never fails the run: exit code is 0 and the model,
+  macro, and report.txt are untouched. A miss means "fix this in
+  the next Continue run", not "throw the model away".
+- MISS = no modeling value or feature absent from the .fcstd;
+  DIFF = value present but different from the drawing (which can
+  also be a drawing misread); REF = tolerance/general-chamfer
+  note rows, not geometry.
