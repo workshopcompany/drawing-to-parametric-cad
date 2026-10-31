@@ -442,12 +442,17 @@ S = {
                         "▶ 이 프로젝트 이어서 작업"),
     "continue_note": ("Write new instructions below and press Continue "
                       "work: the drawing/outline and Q&A history from "
-                      "this result are reused, and a fresh run starts. "
-                      "This does not patch the old model.",
+                      "this result are reused, and the work continues "
+                      "in THIS folder (simple modification only, no "
+                      "new folder is created). The previous model is "
+                      "kept as model.prev.fcstd / model.prev.step in "
+                      "the same folder, then overwritten by the new "
+                      "model.",
                       "아래에 새 지시를 적고 계속 작업을 누르면, 이 "
-                      "결과의 도면/윤곽/Q&A 내역이 재사용되고 새 실행이 "
-                      "시작됩니다. 이전 모델을 고치는 게 아니라 새로 "
-                      "만드는 실행입니다."),
+                      "결과의 도면/윤곽/Q&A 내역이 재사용되고, 이 폴더에서 "
+                      "간단 수정만 진행됩니다. 새 폴더는 만들지 않습니다. "
+                      "이전 모델은 같은 폴더에 model.prev.fcstd / "
+                      "model.prev.step으로 남겨두고, 새 모델이 덮어씁니다."),
     "continue_label": ("New instructions", "새 지시"),
     "answer_title": ("✏️ Answer questions and continue work",
                     "✏️ 질문에 답하고 계속 작업"),
@@ -455,17 +460,15 @@ S = {
                     "the drawing/outline are taken automatically from "
                     "this result, and the full Q&A history so far is "
                     "included automatically, so write only the new "
-                    "answers. This is a fresh run from scratch, not a "
-                    "patch to the old macro. Output goes to a new "
-                    "timestamped folder, where the accumulated Q&A is "
-                    "saved as qa_history.txt.",
+                    "answers. The work continues in THIS folder "
+                    "(simple modification only, no new folder is "
+                    "created); the accumulated Q&A is updated in this "
+                    "folder's qa_history.txt.",
                     "아래에 답을 적고 계속 작업을 누르면, 도면/윤곽은 이 "
                     "결과에서 자동으로 가져오고 지금까지의 Q&A 내역도 "
-                    "자동으로 포함되니 새 답변만 적으면 됩니다. 이전 "
-                    "매크로를 이어서 고치는 게 아니라, 처음부터 새로 "
-                    "만드는 실행입니다. 출력은 시간 붙은 새 폴더에 "
-                    "생기고, 누적된 Q&A는 새 폴더의 qa_history.txt에 "
-                    "저장됩니다."),
+                    "자동으로 포함되니 새 답변만 적으면 됩니다. 이 폴더에서 "
+                    "간단 수정만 진행됩니다. 새 폴더는 만들지 않고, 누적된 "
+                    "Q&A는 이 폴더의 qa_history.txt에 업데이트됩니다."),
     "answer_label": ("Answers (one per question)",
                      "답변 (질문별로 적으세요)"),
     "key_note": ("Key is not stored, used only for this run. Empty "
@@ -476,16 +479,14 @@ S = {
     "dry_label": ("dry-run (assemble the prompt only)",
                   "dry-run (프롬프트 조립만 확인)"),
     "continue_button": ("▶ Continue work", "▶ 계속 작업"),
-    "continue_button_note": ("Continue work starts a fresh run from "
-                             "scratch using this work's history "
+    "continue_button_note": ("Continue work reuses this work's history "
                              "(drawing, outline, Q&A history, numbered "
-                             "dimensions). It does not patch the old "
-                             "model — a new model is built in a new "
-                             "timestamped folder.",
+                             "dimensions) and modifies the model in "
+                             "THIS folder only. No new folder is "
+                             "created.",
                              "계속 작업은 이 작업의 히스토리(도면, 윤곽, "
-                             "Q&A 내역, 번호 도면)를 가지고 처음부터 새로 "
-                             "만드는 실행입니다. 이전 모델을 고치는 게 "
-                             "아니라 새 폴더에 새 모델을 만듭니다."),
+                             "Q&A 내역, 번호 도면)를 가지고 이 폴더에서만 "
+                             "간단 수정합니다. 새 폴더는 만들지 않습니다."),
     "report_title": ("report.txt", "report.txt"),
     "report_none": ("(none)", "(없음)"),
     "guidance_title": ("guidance.txt", "guidance.txt"),
@@ -975,7 +976,12 @@ def resolve_output_dir(raw):
 
 
 def resolve_run_output_dir(raw):
-    """Timestamped sibling folder so a run never overwrites the last.
+    """Timestamped sibling folder so a first run never overwrites.
+
+    Used ONLY for first /run. Modification requests via /answer
+    bypass this function and reuse the previous folder as-is
+    (Oct 31, 2026 user instruction: no new folder for
+    modifications, simple modification in that folder only).
 
     Rules (Oct 30 home-run lesson: every run overwrote
     ./my_run_output, losing the previous model/report):
@@ -2308,8 +2314,24 @@ class Handler(BaseHTTPRequestHandler):
                 outline_path = outlines[0]
                 files["outline"] = (outline_path.name,
                                     outline_path.read_bytes())
-            # resolve_run_output_dir() timestamps this, since the
-            # previous folder already holds a report/model.
+            # Modification requests (Oct 31, 2026 user instruction):
+            # NO new folder. /answer reuses prev_dir as-is and
+            # modifies only in that folder. The timestamped sibling
+            # behaviour in resolve_run_output_dir() is for first
+            # /run only, and is deliberately bypassed below.
+            # Keep the previous model in the SAME folder as a
+            # .prev backup first, because run_pipeline deletes
+            # model.fcstd/model.step before each attempt; without
+            # this, a failed modification run would lose the last
+            # good model from this folder.
+            for _name, _prev in (("model.fcstd", "model.prev.fcstd"),
+                                 ("model.step", "model.prev.step")):
+                _src = prev_dir / _name
+                if _src.is_file():
+                    try:
+                        shutil.copyfile(_src, prev_dir / _prev)
+                    except OSError:
+                        pass
             fields["output_dir"] = str(prev_dir)
             # Accumulate the FULL Q&A trail. Until now only the
             # immediate previous questions + new answers went into
@@ -2381,7 +2403,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(400, data)
             return
 
-        output_dir = resolve_run_output_dir(fields.get("output_dir", ""))
+        # /answer = modification request: reuse the previous folder
+        # as-is, no timestamped sibling. /run (first creation) keeps
+        # the timestamped-folder behaviour in resolve_run_output_dir.
+        if parsed.path == "/answer":
+            output_dir = resolve_output_dir(fields.get("output_dir", ""))
+        else:
+            output_dir = resolve_run_output_dir(fields.get("output_dir", ""))
         output_dir.mkdir(parents=True, exist_ok=True)
         original_name, drawing_bytes = files["drawing"]
         suffix = Path(original_name).suffix or ".png"
