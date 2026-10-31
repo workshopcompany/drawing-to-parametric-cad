@@ -35,6 +35,10 @@ Battery written to out_json:
 - sections: [{z, x_extent, y_extent}] horizontal sections across Z
   (slice() with a thin-slab common() fallback).
 - cyl_diams: [diameters] from cylindrical faces.
+- faces: [{type, center, area, bbox, normal (planes),
+  radius/axis (cylinders)}] for every STEP face, so the caller can
+  attribute STEP faces to .fcstd features (feature-attributed
+  measurement) instead of guessing from the value battery.
 - solids, volume, bbox (tessellation vertices, not BoundBox: for
   B-spline models BoundBox inflates from control poles).
 - bbox_extents: {X, Y, Z} whole-part extents from the same
@@ -70,8 +74,20 @@ def main():
     shape = Part.read(step_path)
     if isinstance(shape, (list, tuple)):
         shape = shape[0]
+    if shape is None or shape.isNull():
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump({"error": "STEP shape is null (empty export?)"},
+                      f, ensure_ascii=False)
+        print("MEASURE FAIL: STEP shape is null")
+        return
     solids = shape.Solids
     verts, _facets = shape.tessellate(0.01)
+    if not verts:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump({"error": "STEP tessellation is empty"}, f,
+                      ensure_ascii=False)
+        print("MEASURE FAIL: STEP tessellation is empty")
+        return
     xs = [v.x for v in verts]
     ys = [v.y for v in verts]
     zs = [v.z for v in verts]
@@ -180,6 +196,81 @@ def main():
                                  "x_extent": round(sx, 3),
                                  "y_extent": round(sy, 3)})
 
+    # Full STEP face dump for feature attribution (see
+    # attribute_step_faces in run_pipeline.py). Bbox from the face
+    # BoundBox: exact for planes/cylinders, may inflate slightly
+    # for B-spline faces (control poles).
+    step_faces = []
+    for face in shape.Faces:
+        rec = {}
+        try:
+            surf = face.Surface
+            tid = surf.TypeId
+            rec["type"] = tid.replace("Part::Geom", "")
+            if tid == "Part::GeomPlane":
+                n = surf.Axis
+                rec["normal"] = [round(float(n.x), 4),
+                                 round(float(n.y), 4),
+                                 round(float(n.z), 4)]
+            elif tid == "Part::GeomCylinder":
+                rec["radius"] = round(float(surf.Radius), 4)
+                ax = surf.Axis
+                rec["axis"] = [round(float(ax.x), 4),
+                               round(float(ax.y), 4),
+                               round(float(ax.z), 4)]
+        except Exception:
+            rec["type"] = "?"
+        try:
+            c = face.CenterOfMass
+            rec["center"] = [round(float(c.x), 4),
+                             round(float(c.y), 4),
+                             round(float(c.z), 4)]
+        except Exception:
+            pass
+        try:
+            rec["area"] = round(float(face.Area), 4)
+        except Exception:
+            pass
+        # Face bbox: tessellation extremes, except cylinders
+        # (analytic). Same pole-inflation reason as read_features:
+        # a planar face bounded by B-splines gets an inflated
+        # BoundBox from control poles. Tessellation vertices lie
+        # on the surface. Extrusion faces also carry ordered curve
+        # samples for span localmin mode.
+        try:
+            tid = face.Surface.TypeId
+            if tid == "Part::GeomCylinder":
+                raise ValueError("cylinder: analytic box")
+            verts, _facets = face.tessellate(0.01)
+            if verts:
+                xs = [v.x for v in verts]
+                ys = [v.y for v in verts]
+                zs = [v.z for v in verts]
+                rec["bbox"] = {"x": [round(min(xs), 4), round(max(xs), 4)],
+                               "y": [round(min(ys), 4), round(max(ys), 4)],
+                               "z": [round(min(zs), 4), round(max(zs), 4)]}
+                if "Extrusion" in tid:
+                    try:
+                        pts = face.Surface.BasisCurve.discretize(
+                            Number=1000)
+                        rec["curve"] = [[round(float(v.x), 4),
+                                         round(float(v.y), 4),
+                                         round(float(v.z), 4)]
+                                        for v in pts]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        if "bbox" not in rec:
+            try:
+                bb = face.BoundBox
+                rec["bbox"] = {"x": [round(bb.XMin, 4), round(bb.XMax, 4)],
+                               "y": [round(bb.YMin, 4), round(bb.YMax, 4)],
+                               "z": [round(bb.ZMin, 4), round(bb.ZMax, 4)]}
+            except Exception:
+                pass
+        step_faces.append(rec)
+
     out = {
         "step": step_path,
         "solids": len(solids),
@@ -195,6 +286,7 @@ def main():
         "vertex_deltas": deltas,
         "sections": sections,
         "cyl_diams": sorted(cyl_diams),
+        "faces": step_faces,
     }
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1, ensure_ascii=False)

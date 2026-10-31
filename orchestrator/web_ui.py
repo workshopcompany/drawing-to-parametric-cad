@@ -1494,7 +1494,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
                 f"<td>{html.escape(str(row.get('no', '—')))}</td>"
                 f"<td>{html.escape(str(row.get('item', '')))}</td>"
                 f"<td>{_fmt(row.get('drawing'))}</td>"
-                f"<td>{_fmt(row.get('modeling'))}</td>"
+                f"<td title=\"{html.escape(str(row.get('modeling_method') or ''))}\">"
+                f"{_fmt(row.get('modeling'))}</td>"
                 f"<td><span class=\"{cls}\">{html.escape(str(res))}</span></td>"
                 f"{measured_cell}{meas_result_cell}</tr>")
         measured_th = (f"<th>{tr(lang, 'th_measured')}</th>"

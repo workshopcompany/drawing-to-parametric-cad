@@ -81,9 +81,10 @@ def render(tris, cam, up, out_path):
 
 
 def main(argv):
-    if len(argv) != 4:
+    if len(argv) not in (4, 7):
         print("usage: render_preview.py tris.json preview_iso.png "
-              "preview_main.png", file=sys.stderr)
+              "preview_main.png [preview_front.png preview_top.png "
+              "preview_side.png]", file=sys.stderr)
         return 2
     tris_path, out_iso, out_main = argv[1], argv[2], argv[3]
     with open(tris_path, encoding="utf-8") as fh:
@@ -106,6 +107,14 @@ def main(argv):
     render(tris, (1, 1, 1), (0, 0, 1), out_iso)
     render(tris, tuple(cam_main), tuple(up_main), out_main)
     print(f"main view: horizontal axis {horiz}, vertical axis {vert}")
+    if len(argv) == 7:
+        # Fixed world-axis views for dimension checking: front
+        # (X horizontal, Z vertical), top (X horizontal, Y
+        # vertical), side (Y horizontal, Z vertical). Values are
+        # always measured in 3D; these views only show WHERE.
+        render(tris, (0, -1, 0), (0, 0, 1), argv[4])
+        render(tris, (0, 0, 1), (0, 1, 0), argv[5])
+        render(tris, (1, 0, 0), (0, 0, 1), argv[6])
     return 0
 
 

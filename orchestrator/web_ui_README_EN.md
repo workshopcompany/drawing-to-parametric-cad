@@ -70,13 +70,20 @@ the drawing". The result page has a new "Drawing ↔ Modeling match"
 tab with a table: No. | Item | Drawing value | Modeling value |
 Result (O/X/?/-). Drawing value = the value the LLM read from the
 drawing and wrote into the macro (a D-dimension from the ask-first
-step, or a user-confirmed answer); modeling value = measured from
-STEP (bbox sizes, cylinder diameters, solids, validity, volume).
-O = within 0.01 mm, X = differs, ? = cannot be mapped automatically,
-~ = reference only. Note: the drawing value is NOT a directly
-measured drawing truth. If the LLM misread the drawing, both
-columns can be wrong together. The table checks "was the intent
-built?", not "does it equal the drawing truth?".
+step, or a user-confirmed answer); modeling value = read from the
+mapping. The building LLM writes a FEATURE_MAP at the top of the
+macro, naming each dimension's feature, sketch, and kind, and the
+pipeline reads the value from the .fcstd feature (Pad length, a
+sketch constraint named after the D-number, a cylinder diameter,
+and so on). A row without a mapping shows ?. O = within 0.01 mm,
+X = differs, ? = cannot be mapped automatically, ~ = reference
+only. Note: the drawing value is NOT a directly measured drawing
+truth. If the LLM misread the drawing, both columns can be wrong
+together. The table checks "was the intent built?", not "does it
+equal the drawing truth?". Hover over a Modeling or Measured cell
+to see which feature the value was read from and how. Result
+folders also gain fixed front/top/side view previews
+(preview_front/top/side.png).
 
 ## Numbered drawing (D1, D2, …)
 In the ask-first step, the LLM lists dimensions it can read as

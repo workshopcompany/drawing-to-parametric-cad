@@ -90,8 +90,9 @@ def render_view(verts, facets, cam, up, size=(900, 675)):
 
 
 def main(argv):
-    if len(argv) != 4:
-        print("usage: render_preview_pil.py tris.json preview_iso.png preview_main.png",
+    if len(argv) not in (4, 7):
+        print("usage: render_preview_pil.py tris.json preview_iso.png preview_main.png "
+              "[preview_front.png preview_top.png preview_side.png]",
               file=sys.stderr)
         return 2
     tris_path, out_iso, out_main = argv[1], argv[2], argv[3]
@@ -119,6 +120,15 @@ def main(argv):
     img_main.save(out_main)
     print(f"saved {out_main} ({n2} triangles)")
     print(f"main view: horizontal axis {horiz}, vertical axis {vert}")
+    if len(argv) == 7:
+        # Fixed world-axis views (same cameras as render_preview.py).
+        for cam, up, out_path in (
+                ((0, -1, 0), (0, 0, 1), argv[4]),
+                ((0, 0, 1), (0, 1, 0), argv[5]),
+                ((1, 0, 0), (0, 0, 1), argv[6])):
+            img, n = render_view(verts, facets, cam, up)
+            img.save(out_path)
+            print(f"saved {out_path} ({n} triangles)")
     return 0
 
 

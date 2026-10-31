@@ -45,6 +45,7 @@ environment error (missing key, missing file, missing freecadcmd).
 """
 
 import argparse
+import ast
 import base64
 import json
 import mimetypes
@@ -82,7 +83,30 @@ MACRO_INSTRUCTION = (
     "Safety: do NOT use subprocess, socket, urllib, requests, shutil, "
     "eval, exec, open, os.system, os.environ, or AttachmentOffset. "
     "For file paths, plain string concatenation or os.path.join only, "
-    "and save with doc.saveAs() / Part.export()."
+    "and save with doc.saveAs() / Part.export(). "
+    "Dimension-to-feature mapping (REQUIRED, no exceptions): at the "
+    "very top of the macro, before any build code, define a FEATURE_MAP "
+    "dict literal keyed by the D-numbers from the dimension list "
+    "(D1, D2, ...). One entry per dimension you build, for example: "
+    "FEATURE_MAP = {\"D8\": {\"feature\": \"Pad_Step\", \"sketch\": "
+    "\"Sketch_Step\", \"kind\": \"diameter\", \"view\": \"front\", "
+    "\"region\": None, \"datum\": None}}. "
+    "feature = the PartDesign feature name that creates this dimension; "
+    "sketch = the sketch that defines it (or None); kind = one of "
+    "pad_length (Pad/Pocket Length), diameter, radius, "
+    "sketch_constraint (a value inside the sketch), feature_extent "
+    "(size of the feature's own shape; add \"axis\": \"X\"/\"Y\"/\"Z\"), "
+    "span (distance between two places; add \"datum\": "
+    "\"<Feature>.top\" or \"<Feature>.bottom\" and \"region\" when only "
+    "part of the feature counts, e.g. \"left\" for a left tip; for a "
+    "LOCAL extremum such as a hook tip dip, add \"localmin\": true "
+    "so the value is the lowest interior local minimum of the "
+    "feature's curves in the region, not a face bbox). "
+    "For sketch_constraint dimensions, name the driving constraint "
+    "after the D-number with sketch.renameConstraint(index, \"D<n>\") "
+    "right after adding it, so the value can be read back exactly. "
+    "Every built dimension MUST have a FEATURE_MAP entry; a dimension "
+    "without one will show ? in the table, never a guessed value."
 )
 
 ASK_FIRST_INSTRUCTION = (
@@ -342,6 +366,46 @@ def extract_macro(content):
         if "import FreeCAD" in fence or "PartDesign" in fence:
             return fence.strip() + "\n"
     return None
+
+
+def extract_feature_map(macro_text):
+    """Parse the FEATURE_MAP dict literal from macro text.
+
+    Returns (mapping, warning_or_None). mapping maps "D<n>" -> entry
+    dict. Accepts a dict literal keyed by D-number, or a list of
+    entry dicts each carrying "no". The search walks the whole AST,
+    so the dict is found even inside a try block. Anything else
+    (missing, unparseable, wrong shape) returns ({}, warning) and
+    never raises: a missing map degrades to ? rows, not a crash.
+    """
+    try:
+        tree = ast.parse(macro_text or "")
+    except SyntaxError:
+        return {}, "FEATURE_MAP: macro does not parse"
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "FEATURE_MAP":
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, SyntaxError):
+                    return {}, "FEATURE_MAP: not a literal"
+                entries = {}
+                if isinstance(value, dict):
+                    for key, entry in value.items():
+                        if isinstance(entry, dict):
+                            entries[str(key)] = entry
+                elif isinstance(value, list):
+                    for entry in value:
+                        if isinstance(entry, dict) and entry.get("no"):
+                            clean = dict(entry)
+                            clean.pop("no", None)
+                            entries[str(entry["no"])] = clean
+                else:
+                    return {}, "FEATURE_MAP: wrong shape"
+                return entries, None
+    return {}, "FEATURE_MAP: not present in macro"
 
 
 def looks_like_question(content):
@@ -968,14 +1032,257 @@ def annotate_drawing(drawing_path, dims, out_path):
         return False
 
 
-def build_matching(verification, macro_text, user_text):
+def _features_by_name(features_data):
+    """features.json -> {feature name: record} (empty dict if unusable)."""
+    if isinstance(features_data, dict):
+        items = features_data.get("features") or []
+    elif isinstance(features_data, list):
+        items = features_data
+    else:
+        items = []
+    return {f.get("name"): f for f in items if isinstance(f, dict)
+            and f.get("name")}
+
+
+def _region_cut(faces, view, region):
+    """Single-axis region rule -> (axis_index, threshold, keep_below).
+
+    Returns None when no region/view applies. Axes: front (X-Z),
+    side (Y-Z), top/section (X-Y). left/right/top/bottom =
+    half-split by face-center mean; leftmost/rightmost/topmost/
+    bottommost = outer-quarter band of the face bbox range.
+    keep_below True means keep coords < threshold, else >.
+    """
+    if not region or not view:
+        return None
+    axes = {"front": ("x", "z"), "side": ("y", "z"),
+            "top": ("x", "y"), "section": ("x", "y")}
+    if view not in axes:
+        return None
+    h_axis, v_axis = axes[view]
+    hi = {"x": 0, "y": 1, "z": 2}[h_axis]
+    vi = {"x": 0, "y": 1, "z": 2}[v_axis]
+    usable = [f for f in faces if f.get("center")]
+    if not usable:
+        return None
+    if region in ("left", "right", "top", "bottom"):
+        mh = sum(f["center"][hi] for f in usable) / len(usable)
+        mv = sum(f["center"][vi] for f in usable) / len(usable)
+        if region == "left":
+            return (hi, mh, True)
+        if region == "right":
+            return (hi, mh, False)
+        if region == "bottom":
+            return (vi, mv, True)
+        return (vi, mv, False)
+    if region in ("leftmost", "rightmost", "topmost", "bottommost"):
+        bboxes = [f["bbox"] for f in usable if f.get("bbox")]
+        if not bboxes:
+            return None
+        if region in ("leftmost", "rightmost"):
+            lo = min(b[h_axis][0] for b in bboxes)
+            hi_v = max(b[h_axis][1] for b in bboxes)
+            if region == "leftmost":
+                return (hi, lo + 0.25 * (hi_v - lo), True)
+            return (hi, hi_v - 0.25 * (hi_v - lo), False)
+        lo = min(b[v_axis][0] for b in bboxes)
+        hi_v = max(b[v_axis][1] for b in bboxes)
+        if region == "topmost":
+            return (vi, hi_v - 0.25 * (hi_v - lo), False)
+        return (vi, lo + 0.25 * (hi_v - lo), True)
+    return None
+
+
+def _region_filter_faces(faces, view, region):
+    """Split a feature's faces by view-plane centroid vs feature extent.
+
+    No view or no region -> unfiltered. Faces without a center are
+    dropped when filtering.
+    """
+    cut = _region_cut(faces, view, region)
+    if cut is None:
+        return faces
+    ai, thr, below = cut
+    usable = [f for f in faces if f.get("center")]
+    if below:
+        return [f for f in usable if f["center"][ai] < thr]
+    return [f for f in usable if f["center"][ai] > thr]
+
+
+def _region_filter_points(points, faces, view, region):
+    """Filter 3D points by the same region rule as faces.
+
+    The cut is computed from the feature's faces (the region is
+    defined on the whole feature), then applied to point coords.
+    """
+    cut = _region_cut(faces, view, region)
+    if cut is None:
+        return points
+    ai, thr, below = cut
+    if below:
+        return [pt for pt in points if pt[ai] < thr]
+    return [pt for pt in points if pt[ai] > thr]
+
+
+def resolve_mapping_value(d_id, entry, by_name):
+    """Read one dimension's modeling value from the .fcstd dump.
+
+    Returns (value_or_None, method_string). Value None means
+    "cannot be read" -> ? row, never a guessed number. Only the
+    mapped feature's own data is used: no macro-text hunting, no
+    whole-part bbox, no cylinder competition.
+    """
+    if not isinstance(entry, dict):
+        return None, "mapping entry not a dict"
+    fname = entry.get("feature")
+    if not fname:
+        return None, "mapping has no feature"
+    feat = by_name.get(fname)
+    if feat is None:
+        return None, f"feature {fname} not found in .fcstd"
+    kind = (entry.get("kind") or "").strip()
+    faces = feat.get("created_faces") or []
+    if kind == "pad_length":
+        v = feat.get("length")
+        if v is not None:
+            return float(v), f"{fname} Length"
+        return None, f"{fname} has no Length"
+    if kind == "chamfer_size":
+        v = feat.get("size")
+        if v is not None:
+            return float(v), f"{fname} Size"
+        return None, f"{fname} has no Size"
+    if kind in ("diameter", "radius"):
+        sel = _region_filter_faces(faces, entry.get("view"),
+                                   entry.get("region"))
+        diams = sorted({round(2 * f["radius"], 4) for f in sel
+                        if f.get("radius") is not None})
+        if len(diams) == 1:
+            d = diams[0]
+            if kind == "diameter":
+                return d, f"{fname} cylinder diameter"
+            return round(d / 2, 4), f"{fname} cylinder radius"
+        return None, (f"{fname}: {len(diams)} cylinder diameters "
+                      "(ambiguous)")
+    if kind == "sketch_constraint":
+        sk_name = entry.get("sketch") or feat.get("sketch")
+        sk = by_name.get(sk_name) if sk_name else None
+        if sk is None:
+            return None, f"sketch {sk_name} not found in .fcstd"
+        for c in sk.get("constraints", []):
+            if c.get("name") == d_id:
+                v = c.get("value")
+                if v is not None:
+                    return float(v), f"{sk_name} constraint {d_id}"
+                return None, f"{sk_name} constraint {d_id} has no value"
+        return None, f"{sk_name} has no constraint named {d_id}"
+    if kind == "feature_extent":
+        axis = (entry.get("axis") or "").upper()
+        if axis not in ("X", "Y", "Z"):
+            return None, "feature_extent needs axis X/Y/Z"
+        key = axis.lower()
+        sel = _region_filter_faces(faces, entry.get("view"),
+                                   entry.get("region"))
+        vals = [f["bbox"][key] for f in sel if f.get("bbox")]
+        if not vals:
+            return None, f"{fname}: no faces for extent {axis}"
+        lo = min(v[0] for v in vals)
+        hi = max(v[1] for v in vals)
+        return round(hi - lo, 4), f"{fname} extent {axis}"
+    if kind == "span":
+        axis = (entry.get("axis") or "").upper()
+        if axis not in ("X", "Y", "Z"):
+            axis = {"front": "Z", "side": "Z", "top": "Y",
+                    "section": "Y"}.get(entry.get("view"), "Z")
+        key = axis.lower()
+        sel = _region_filter_faces(faces, entry.get("view"),
+                                   entry.get("region"))
+        extremum = (entry.get("extremum") or "max").lower()
+        top = None
+        if entry.get("localmin"):
+            # Hook-tip dip: lowest interior local minimum of the
+            # feature's ORDERED curve samples in the region. A
+            # band min/max would catch the band edge (where the
+            # curve enters the band), not the dip; unordered
+            # tessellation vertices cannot tell them apart.
+            cands = []
+            ai3 = {"X": 0, "Y": 1, "Z": 2}[axis]
+            for f in sel:
+                pts = _region_filter_points(f.get("curve") or [],
+                                            faces, entry.get("view"),
+                                            entry.get("region"))
+                for i in range(1, len(pts) - 1):
+                    a = pts[i][ai3]
+                    if a <= pts[i-1][ai3] and a <= pts[i+1][ai3] and \
+                            (a < pts[i-1][ai3] or a < pts[i+1][ai3]):
+                        cands.append(a)
+            if cands:
+                top = min(cands)
+            else:
+                return None, f"{fname}: no local minimum in region"
+        if top is None:
+            vals = [f["bbox"][key] for f in sel if f.get("bbox")]
+            if not vals:
+                return None, f"{fname}: no faces for span {axis}"
+            top = (max(v[1] for v in vals) if extremum != "min"
+                   else min(v[0] for v in vals))
+        datum = entry.get("datum")
+        if not datum or "." not in str(datum):
+            return None, "span needs datum '<Feature>.top|.bottom'"
+        dfeat_name, dside = str(datum).rsplit(".", 1)
+        dfeat = by_name.get(dfeat_name)
+        if dfeat is None:
+            return None, f"datum feature {dfeat_name} not found"
+        dvals = [f["bbox"][key] for f in (dfeat.get("created_faces") or [])
+                 if f.get("bbox")]
+        if not dvals:
+            return None, f"datum feature {dfeat_name} has no faces"
+        if dside == "top":
+            dval = max(v[1] for v in dvals)
+        elif dside == "bottom":
+            dval = min(v[0] for v in dvals)
+        else:
+            return None, f"datum side must be .top or .bottom, got {datum}"
+        return round(top - dval, 4), f"{fname} span {axis} from {datum}"
+    return None, f"unknown kind {kind!r}"
+
+
+def _always_rows(verification):
+    """Always-present rows (solids, valid, bbox, cylinders, volume)."""
+    rows = []
+    rows.append(_match_row("—", "Solids (count)", 1,
+                           verification.get("solids")))
+    rows.append(_match_row("—", "Valid solid", True,
+                           verification.get("valid")))
+    for label, key in (("BBox size X", "size_x"), ("BBox size Y", "size_y"),
+                       ("BBox size Z", "size_z")):
+        rows.append(_match_row("—", label, None, verification.get(key)))
+    cyl = verification.get("cyl_diams", [])
+    rows.append(_match_row("—", "Cylinder diameters found", None,
+                           ", ".join(f"{v:.2f}" for v in cyl) if cyl else None))
+    rows.append(_match_row("—", "Volume (reference only)", None,
+                           verification.get("volume")))
+    return rows
+
+
+def build_matching(verification, macro_text, user_text, mapping=None,
+                   features=None):
     """Build the drawing-vs-modeling table rows.
+
+    Two paths. When mapping is not None (a FEATURE_MAP dict, possibly
+    empty), the mapping path runs: each D-row is read from the .fcstd
+    feature dump ONLY (resolve_mapping_value); a D-row with no
+    mapping entry, a missing feature, or an unreadable kind shows ?.
+    Macro-text hunting, whole-part bbox rules, and cylinder
+    competition are NOT used on this path. When mapping is None
+    (old folders without mapping.json), the legacy path below runs
+    unchanged, so old tables are never downgraded by a refresh.
 
     Row order: D-dimensions (ask-first / answer text) first, then
     macro parameters not already covered, then always-present rows
     (solids, valid, bbox sizes, cylinder diameters, volume).
 
-    Resolution order per D-row (first hit wins):
+    Legacy resolution order per D-row (first hit wins):
     1. Reference dimension -> "? (참조치수)" (non-driving, never X).
     2. Macro parameter, two tiers (see _find_macro_param): a shared
        specific word makes it the feature (O/X by tolerance); a
@@ -989,6 +1296,33 @@ def build_matching(verification, macro_text, user_text):
        them to a bbox size produced the bogus-X table. A row whose
        comparison is itself invalid shows ?, never X.
     """
+    if mapping is not None:
+        by_name = _features_by_name(features)
+        rows = []
+        for d in parse_numbered_dimensions(user_text or ""):
+            item = d["label"]
+            if d.get("view"):
+                item = f"{item} [{d['view']}]"
+            if _is_reference_dim(d):
+                rows.append({"no": d["id"], "item": item,
+                             "drawing": d["value"], "modeling": None,
+                             "result": "? (참조치수)",
+                             "view": d.get("view")})
+                continue
+            entry = mapping.get(d["id"])
+            if entry is None:
+                rows.append({"no": d["id"], "item": item,
+                             "drawing": d["value"], "modeling": None,
+                             "result": "?", "view": d.get("view"),
+                             "modeling_method": "no FEATURE_MAP entry"})
+                continue
+            value, method = resolve_mapping_value(d["id"], entry, by_name)
+            row = _match_row(d["id"], item, d["value"], value)
+            row["view"] = d.get("view")
+            row["modeling_method"] = method
+            rows.append(row)
+        rows.extend(_always_rows(verification))
+        return rows
     rows = []
     used_macro = set()
     macro_params = parse_macro_dimensions(macro_text)
@@ -1058,16 +1392,7 @@ def build_matching(verification, macro_text, user_text):
             continue
         rows.append(_match_row("—", name, value, modeling))
     # Always-present rows.
-    rows.append(_match_row("—", "Solids (count)", 1, verification.get("solids")))
-    rows.append(_match_row("—", "Valid solid", True, verification.get("valid")))
-    for label, key in (("BBox size X", "size_x"), ("BBox size Y", "size_y"),
-                       ("BBox size Z", "size_z")):
-        rows.append(_match_row("—", label, None, verification.get(key)))
-    cyl = verification.get("cyl_diams", [])
-    rows.append(_match_row("—", "Cylinder diameters found", None,
-                           ", ".join(f"{v:.2f}" for v in cyl) if cyl else None))
-    rows.append(_match_row("—", "Volume (reference only)", None,
-                           verification.get("volume")))
+    rows.extend(_always_rows(verification))
     return rows
 
 
@@ -1103,6 +1428,12 @@ def match_measured(label, value, view, measurements):
     against the drawing value (general tolerance ±0.1, not the
     strict 0.01 table tolerance).
     - Diameter/radius rows use cylinder faces only.
+    - Every other size row also lets cylinder diameters compete
+      on closeness (tight 0.05 band, axis-free): a width of a
+      round feature IS its diameter, and without this an axial
+      length or a position won instead (14.5 for a 16 step,
+      9.5 for a 10 boss). Diameter only, never radius: a flat
+      0.75 must not match a 1.50 cylinder halved.
     - Offset/position/tolerance rows are not measured in v1:
       they are positions, not sizes.
     - Every other size row takes the best battery value (face
@@ -1191,6 +1522,18 @@ def match_measured(label, value, view, measurements):
         if allowed(axis):
             cands.append((ext, f"bbox {axis} extent", rank(axis),
                           wide_band))
+    # Cylinder diameters also compete for non-dia rows: a "width"
+    # of a round feature IS its diameter (gear step dia 16, boss
+    # dia 10), but width rows skip the dia route above, so an
+    # axial length (14.5) or a position (9.5) won by closeness
+    # instead. Cylinders are axis-free (rank 1) with the tight
+    # exact band: a diameter is an exact CAD value, and a loose
+    # band would let a near cylinder pose as an unrelated size.
+    # Diameter only, never radius: a flat 0.75 must not match a
+    # 1.50 cylinder halved. Appended last, so on an exact tie an
+    # existing pool wins and the value/verdict stay put.
+    for c in sorted(set(measurements.get("cyl_diams", []))):
+        cands.append((c, "cylinder diameter", 1, exact_band))
     if not cands:
         return None, None
     # Rank within bands, in two tiers: preferred-axis and
@@ -1206,6 +1549,382 @@ def match_measured(label, value, view, measurements):
     best = min(near, key=lambda c: (0 if c[2] in (0, 1) else 1,
                                     abs(c[0] - value)))
     return best[0], best[1]
+
+
+def attribute_step_faces(features_data, step_faces):
+    """Match final-STEP faces to .fcstd features' created faces.
+
+    Returns {feature_name: [step_face_index, ...]}. A STEP face
+    matches a created face when: same surface type, center within
+    0.01 mm, area within 1% (or 0.01 abs), and for cylinders radius
+    within 0.001, for planes normals parallel (|dot| > 0.999).
+    Features claim in REVERSE tree order (latest creator first),
+    each STEP face claimed at most once, best center distance
+    wins. A created face that vanished from the final shape (fused
+    away, e.g. a step back face buried by the body) simply matches
+    nothing, which is the honest answer for it.
+    """
+    items = [(f.get("name"), f) for f in
+             (features_data.get("features") if isinstance(features_data,
+                                                          dict) else [])
+             if isinstance(f, dict) and f.get("name")]
+    claimed = set()
+    attribution = {}
+    for fname, feat in reversed(items):
+        got = []
+        for created in feat.get("created_faces") or []:
+            cc = created.get("center")
+            if cc is None:
+                continue
+            best = None
+            for si, sf in enumerate(step_faces):
+                if si in claimed:
+                    continue
+                if sf.get("type") != created.get("type"):
+                    continue
+                sc = sf.get("center")
+                if sc is None:
+                    continue
+                dist = ((sc[0] - cc[0]) ** 2 + (sc[1] - cc[1]) ** 2
+                        + (sc[2] - cc[2]) ** 2) ** 0.5
+                if dist > 0.01:
+                    continue
+                ca, sa = created.get("area"), sf.get("area")
+                if ca is None or sa is None:
+                    continue
+                if abs(ca - sa) > max(0.01, 0.01 * abs(ca)):
+                    continue
+                if created.get("type") == "Cylinder":
+                    cr, sr = created.get("radius"), sf.get("radius")
+                    if cr is None or sr is None or abs(cr - sr) > 0.001:
+                        continue
+                elif created.get("type") == "Plane":
+                    cn, sn = created.get("normal"), sf.get("normal")
+                    if cn is None or sn is None:
+                        continue
+                    dot = abs(sum(cn[i] * sn[i] for i in range(3)))
+                    if dot < 0.999:
+                        continue
+                if best is None or dist < best[0]:
+                    best = (dist, si)
+            if best is not None:
+                claimed.add(best[1])
+                got.append(best[1])
+        if got:
+            attribution[fname] = got
+    return attribution
+
+
+def _attributed_faces(fname, attribution, step_faces):
+    idxs = attribution.get(fname) or []
+    return [step_faces[i] for i in idxs if 0 <= i < len(step_faces)]
+
+
+def measure_anchored(d_id, entry, by_name, attribution, step_faces):
+    """Measure one dimension on the STEP file via its mapped feature.
+
+    Returns (value_or_None, method_string). The method names the
+    feature and the rule, so every measured value is auditable.
+    Value None means "cannot be measured this way" -> ? (never a
+    battery guess). Only the mapped feature's attributed STEP faces
+    are used: no value-proximity competition across the part.
+    """
+    if not isinstance(entry, dict):
+        return None, "mapping entry not a dict"
+    fname = entry.get("feature")
+    if not fname:
+        return None, "mapping has no feature"
+    feat = by_name.get(fname)
+    if feat is None:
+        return None, f"feature {fname} not found in .fcstd"
+    faces = _attributed_faces(fname, attribution, step_faces)
+    kind = (entry.get("kind") or "").strip()
+    # NOTE: no global "no attributed faces" return here. Relocation
+    # kinds (diameter/radius/pad_length/chamfer_size) read the
+    # feature's own created data + the full STEP face list, so they
+    # work even when attribution is empty (trimmed/merged faces).
+    # Attributed-only kinds (extent/span/sketch_constraint) check
+    # for empty faces in their own branches.
+    if kind in ("diameter", "radius"):
+        # Relocation, like pad_length end planes: a later feature
+        # may trim the feature's cylinder (body side cut by the
+        # chamfer), so attribution by area can lose it -- but a
+        # cylinder of the radius this feature was built with still
+        # exists in the STEP. The radii come from the feature's
+        # own created faces, never from the drawing value, so this
+        # is not bag-picking. Region filter applies first when the
+        # entry names one (e.g. left R0.75 vs right R0.8 arcs).
+        sel = _region_filter_faces(feat.get("created_faces") or [],
+                                   entry.get("view"),
+                                   entry.get("region"))
+        radii = {round(f["radius"], 4) for f in sel
+                 if f.get("radius") is not None}
+        if not radii:
+            return None, f"{fname}: no cylinder radii in created faces"
+        step_sel = _region_filter_faces(step_faces, entry.get("view"),
+                                        entry.get("region"))
+        diams = sorted({round(2 * f["radius"], 4) for f in step_sel
+                        if f.get("radius") is not None
+                        and any(abs(f["radius"] - r) < 0.001
+                                for r in radii)})
+        if len(diams) == 1:
+            d = diams[0]
+            if kind == "diameter":
+                return d, f"{fname} cylinder diameter"
+            return round(d / 2, 4), f"{fname} cylinder radius"
+        return None, (f"{fname}: {len(diams)} cylinder diameters "
+                      "for its radii (ambiguous)")
+    if kind == "pad_length":
+        normal = feat.get("sketch_normal")
+        if not normal:
+            return None, f"{fname}: no sketch normal"
+        ai = max(range(3), key=lambda i: abs(normal[i]))
+        if abs(normal[ai]) < 0.9:
+            return None, f"{fname}: sketch normal not axis-aligned"
+        axis = "XYZ"[ai]
+        # End planes: the feature's OWN created planes (from
+        # .fcstd) relocated in the STEP. A later feature may trim
+        # an end plane (recess ring cut from the body back, crown
+        # root fused into the base), changing its area, so
+        # attribution by area can lose it -- but the plane itself
+        # (same normal + offset) still exists in the STEP,
+        # possibly under another feature's name. Relocation finds
+        # it by offset, not by owner: the offsets are the
+        # feature's own, so this is not bag-picking.
+        created_offsets = sorted({round(f["center"][ai], 3)
+                                  for f in feat.get("created_faces", [])
+                                  if f.get("type") == "Plane"
+                                  and f.get("normal")
+                                  and abs(f["normal"][ai]) > 0.999
+                                  and f.get("center")})
+        if len(created_offsets) < 2:
+            return None, (f"{fname}: {len(created_offsets)} end "
+                          "planes (need 2)")
+        lo, hi = created_offsets[0], created_offsets[-1]
+        missing = [t for t in (lo, hi)
+                   if not any(sf.get("type") == "Plane"
+                              and sf.get("normal")
+                              and abs(sf["normal"][ai]) > 0.999
+                              and sf.get("center")
+                              and abs(sf["center"][ai] - t) < 0.01
+                              for sf in step_faces)]
+        if missing:
+            return None, f"{fname}: end plane {missing[0]} missing in STEP"
+        return round(hi - lo, 4), f"{fname} end planes ({axis})"
+    if kind == "feature_extent":
+        if not faces:
+            return None, f"no STEP faces attributed to {fname}"
+        axis = (entry.get("axis") or "").upper()
+        if axis not in ("X", "Y", "Z"):
+            return None, "feature_extent needs axis X/Y/Z"
+        key = axis.lower()
+        sel = _region_filter_faces(faces, entry.get("view"),
+                                   entry.get("region"))
+        vals = [f["bbox"][key] for f in sel if f.get("bbox")]
+        if not vals:
+            return None, f"{fname}: no faces for extent {axis}"
+        return (round(max(v[1] for v in vals) - min(v[0] for v in vals),
+                      4),
+                f"{fname} extent {axis}")
+    if kind == "span":
+        if not faces:
+            return None, f"no STEP faces attributed to {fname}"
+        axis = (entry.get("axis") or "").upper()
+        if axis not in ("X", "Y", "Z"):
+            axis = {"front": "Z", "side": "Z", "top": "Y",
+                    "section": "Y"}.get(entry.get("view"), "Z")
+        key = axis.lower()
+        sel = _region_filter_faces(faces, entry.get("view"),
+                                   entry.get("region"))
+        extremum = (entry.get("extremum") or "max").lower()
+        top = None
+        if entry.get("localmin"):
+            # Hook-tip dip: lowest interior local minimum of the
+            # feature's ORDERED curve samples in the region. A
+            # band min/max would catch the band edge (where the
+            # curve enters the band), not the dip; unordered
+            # tessellation vertices cannot tell them apart.
+            cands = []
+            ai3 = {"X": 0, "Y": 1, "Z": 2}[axis]
+            for f in sel:
+                pts = _region_filter_points(f.get("curve") or [],
+                                            faces, entry.get("view"),
+                                            entry.get("region"))
+                for i in range(1, len(pts) - 1):
+                    a = pts[i][ai3]
+                    if a <= pts[i-1][ai3] and a <= pts[i+1][ai3] and \
+                            (a < pts[i-1][ai3] or a < pts[i+1][ai3]):
+                        cands.append(a)
+            if cands:
+                top = min(cands)
+            else:
+                return None, f"{fname}: no local minimum in region"
+        if top is None:
+            vals = [f["bbox"][key] for f in sel if f.get("bbox")]
+            if not vals:
+                return None, f"{fname}: no faces for span {axis}"
+            top = (max(v[1] for v in vals) if extremum != "min"
+                   else min(v[0] for v in vals))
+        datum = entry.get("datum")
+        if not datum or "." not in str(datum):
+            return None, "span needs datum '<Feature>.top|.bottom'"
+        dfeat_name, dside = str(datum).rsplit(".", 1)
+        if dside not in ("top", "bottom"):
+            return None, f"datum side must be .top or .bottom, got {datum}"
+        # Datum value: the datum feature's own created planes along
+        # the span axis, relocated in the STEP (same end-plane
+        # relocation as pad_length: a trimmed datum plane still
+        # exists at its offset). Fallback: attributed bbox.
+        ai2 = {"X": 0, "Y": 1, "Z": 2}[axis]
+        dfeat = by_name.get(dfeat_name)
+        dval = None
+        if dfeat is not None:
+            doffsets = sorted({round(f["center"][ai2], 3)
+                               for f in dfeat.get("created_faces", [])
+                               if f.get("type") == "Plane"
+                               and f.get("normal")
+                               and abs(f["normal"][ai2]) > 0.999
+                               and f.get("center")})
+            found = [o for o in doffsets
+                     if any(sf.get("type") == "Plane"
+                            and sf.get("normal")
+                            and abs(sf["normal"][ai2]) > 0.999
+                            and sf.get("center")
+                            and abs(sf["center"][ai2] - o) < 0.01
+                            for sf in step_faces)]
+            if found:
+                dval = max(found) if dside == "top" else min(found)
+        if dval is None:
+            dfaces = _attributed_faces(dfeat_name, attribution, step_faces)
+            dvals = [f["bbox"][key] for f in dfaces if f.get("bbox")]
+            if not dvals:
+                return None, (f"datum feature {dfeat_name} has no "
+                              "attributed faces")
+            dval = max(v[1] for v in dvals) if dside == "top" \
+                else min(v[0] for v in dvals)
+        return round(top - dval, 4), f"{fname} span {axis} from {datum}"
+    if kind == "chamfer_size":
+        return None, f"{fname} chamfer faces not measured in v1"
+    if kind == "sketch_constraint":
+        if not faces:
+            return None, f"no STEP faces attributed to {fname}"
+        sk_name = entry.get("sketch") or feat.get("sketch")
+        sk = by_name.get(sk_name) if sk_name else None
+        if sk is None:
+            return None, f"sketch {sk_name} not found in .fcstd"
+        cons = [c for c in sk.get("constraints", [])
+                if c.get("name") == d_id]
+        if not cons:
+            return None, f"{sk_name} has no constraint named {d_id}"
+        c = cons[0]
+        geom = {g.get("index"): g for g in sk.get("geometry", [])}
+        g1 = geom.get(c.get("first"))
+        g2 = geom.get(c.get("second"))
+        if c.get("type") in ("Diameter", "Radius") and g1 and \
+                g1.get("type") in ("Circle", "ArcOfCircle"):
+            diams = sorted({round(2 * f["radius"], 4) for f in faces
+                            if f.get("radius") is not None})
+            if len(diams) == 1:
+                d = diams[0]
+                if c["type"] == "Diameter":
+                    return d, f"{fname} cylinder diameter"
+                return round(d / 2, 4), f"{fname} cylinder radius"
+            return None, (f"{fname}: {len(diams)} cylinder diameters "
+                          "(ambiguous)")
+        # Direction constraint: DistanceX/Y uses the sketch axes;
+        # Distance between two lines uses line_dir x extrusion.
+        if c.get("type") in ("DistanceX", "DistanceY"):
+            key = "sketch_x" if c["type"] == "DistanceX" else "sketch_y"
+            n = sk.get(key)
+            if not n:
+                return None, f"{sk_name}: no {key}"
+        else:
+            line = g1 if g1 and g1.get("type") == "LineSegment" else g2
+            normal = feat.get("sketch_normal") or sk.get("sketch_normal")
+            if line is None or not line.get("start") \
+                    or not line.get("end") or not normal:
+                return None, (f"{sk_name} constraint {d_id}: no line "
+                              "geometry")
+            ld = [line["end"][i] - line["start"][i] for i in range(3)]
+            ln = (ld[0] ** 2 + ld[1] ** 2 + ld[2] ** 2) ** 0.5
+            if ln < 1e-9:
+                return None, (f"{sk_name} constraint {d_id}: "
+                              "zero-length line")
+            ld = [x / ln for x in ld]
+            n = [ld[1] * normal[2] - ld[2] * normal[1],
+                 ld[2] * normal[0] - ld[0] * normal[2],
+                 ld[0] * normal[1] - ld[1] * normal[0]]
+            nn = (n[0] ** 2 + n[1] ** 2 + n[2] ** 2) ** 0.5
+            if nn < 1e-9:
+                return None, (f"{sk_name} constraint {d_id}: line "
+                              "parallel to extrusion")
+            n = [x / nn for x in n]
+        planes = [f for f in faces
+                  if f.get("type") == "Plane" and f.get("normal")
+                  and abs(sum(f["normal"][i] * n[i]
+                              for i in range(3))) > 0.999]
+        offsets = sorted({round(sum(f["center"][i] * n[i]
+                                  for i in range(3)), 3)
+                          for f in planes if f.get("center")})
+        if len(offsets) == 2:
+            return (round(offsets[1] - offsets[0], 4),
+                    f"{fname} faces normal to sketch line")
+        # Fallback: a later feature may trim a wall (slot wall cut
+        # by a hole), so attribution by area loses it -- but the
+        # wall pieces still exist in the STEP. Relocate by the
+        # SKETCH frame: STEP planes with the expected normal whose
+        # center lies inside the sketch profile's (u, v) bbox.
+        # Other features' parallel walls (base sides) fall outside
+        # it. (The feature's created bbox does NOT work here: a
+        # through pocket "creates" the split top/bottom caps, so
+        # its created bbox spans the whole base.)
+        sk2 = by_name.get(sk_name) if sk_name else None
+        if sk2 is not None and sk2.get("sketch_origin") \
+                and sk2.get("sketch_x") and sk2.get("sketch_y"):
+            org, xa, ya = (sk2["sketch_origin"], sk2["sketch_x"],
+                           sk2["sketch_y"])
+
+            def _uv(pt):
+                d = [pt[i] - org[i] for i in range(3)]
+                return (sum(d[i] * xa[i] for i in range(3)),
+                        sum(d[i] * ya[i] for i in range(3)))
+            us, vs = [], []
+            for g in sk2.get("geometry", []):
+                for key in ("start", "end"):
+                    if g.get(key):
+                        u, v = _uv(g[key])
+                        us.append(u)
+                        vs.append(v)
+                if g.get("center") is not None \
+                        and g.get("radius") is not None:
+                    cu, cv = _uv(g["center"])
+                    us += [cu - g["radius"], cu + g["radius"]]
+                    vs += [cv - g["radius"], cv + g["radius"]]
+            if us and vs:
+                ulo, uhi = min(us) - 0.01, max(us) + 0.01
+                vlo, vhi = min(vs) - 0.01, max(vs) + 0.01
+                planes2 = []
+                for f in step_faces:
+                    if f.get("type") != "Plane" or not f.get("normal"):
+                        continue
+                    if abs(sum(f["normal"][i] * n[i]
+                               for i in range(3))) <= 0.999:
+                        continue
+                    if not f.get("center"):
+                        continue
+                    u, v = _uv(f["center"])
+                    if ulo <= u <= uhi and vlo <= v <= vhi:
+                        planes2.append(f)
+                offsets2 = sorted({round(sum(f["center"][i] * n[i]
+                                           for i in range(3)), 3)
+                                   for f in planes2})
+                if len(offsets2) == 2:
+                    return (round(offsets2[1] - offsets2[0], 4),
+                            f"{fname} faces normal to sketch line "
+                            "(region)")
+        return None, (f"{fname}: {len(offsets)} faces normal to "
+                      "sketch line (need 2)")
+    return None, f"unknown kind {kind!r}"
 
 
 def run_measure_mode(output_dir, freecadcmd):
@@ -1302,15 +2021,66 @@ def run_measure_mode(output_dir, freecadcmd):
                 view_txt = f" [{view}]" if view else ""
                 d_lines.append(f"{r.get('no')}: {label} = {val_txt} mm"
                                f"{view_txt}")
-            new_rows = build_matching(verification, macro_text,
-                                      "\n".join(d_lines))
+            new_rows = None
+            mapping_data = None
+            mapping_file = output_dir / "mapping.json"
+            if mapping_file.is_file():
+                try:
+                    mapping_data = json.loads(
+                        mapping_file.read_text(encoding="utf-8"))
+                except Exception:
+                    mapping_data = None
+            if mapping_data is None:
+                m2, _ = extract_feature_map(macro_text)
+                if m2:
+                    mapping_data = m2
+            if mapping_data is not None:
+                features_data = run_read_features(
+                    freecadcmd, output_dir / "model.fcstd", output_dir)
+                if features_data is None:
+                    print("MEASURE NOTE: mapping refresh skipped "
+                          "(features unreadable); keeping existing rows")
+                else:
+                    new_rows = build_matching(
+                        verification, macro_text, "\n".join(d_lines),
+                        mapping=mapping_data, features=features_data)
+            else:
+                new_rows = build_matching(verification, macro_text,
+                                          "\n".join(d_lines))
             if verification.get("ok") and new_rows:
                 rows = new_rows
-                print(f"MEASURE NOTE: modeling column refreshed with "
-                      f"current rules ({len(new_rows)} rows)")
+                print(f"MEASURE NOTE: modeling column refreshed "
+                      f"({len(new_rows)} rows)")
         except Exception as exc:
             print(f"MEASURE NOTE: modeling refresh skipped ({exc}); "
                   f"keeping existing rows")
+    # Anchored measurement when the folder carries a mapping (new
+    # builds): each D-row is measured on its mapped feature's STEP
+    # faces only. Without a mapping (old folders) the battery
+    # fallback runs, exactly as before. A mapping WITHOUT readable
+    # features/STEP faces gives ? rows, never a silent battery
+    # fallback: the gap must stay visible.
+    mapping_data = None
+    mapping_present = False
+    mapping_file = output_dir / "mapping.json"
+    if mapping_file.is_file():
+        try:
+            mapping_data = json.loads(
+                mapping_file.read_text(encoding="utf-8"))
+            mapping_present = True
+        except Exception:
+            mapping_data = None
+    anchored = None
+    anchored_by_name = {}
+    anchored_faces = []
+    if mapping_present:
+        features_data = run_read_features(
+            freecadcmd, output_dir / "model.fcstd", output_dir)
+        step_faces = measurements.get("faces") or []
+        if features_data is not None and step_faces:
+            anchored_by_name = _features_by_name(features_data)
+            anchored = attribute_step_faces(features_data, step_faces)
+            anchored_faces = step_faces
     measured_count = 0
     d_count = 0
     for row in rows:
@@ -1331,8 +2101,19 @@ def run_measure_mode(output_dir, freecadcmd):
             row["measured_method"] = None
             row["measured_result"] = None
             continue
-        measured, method = match_measured(label, float(value), view,
-                                          measurements)
+        if mapping_present:
+            entry = mapping_data.get(no)
+            if entry is None:
+                measured, method = None, "no FEATURE_MAP entry"
+            elif anchored is None:
+                measured, method = None, \
+                    "attribution unavailable (.fcstd or STEP faces)"
+            else:
+                measured, method = measure_anchored(
+                    no, entry, anchored_by_name, anchored, anchored_faces)
+        else:
+            measured, method = match_measured(label, float(value), view,
+                                              measurements)
         row["measured"] = measured
         row["measured_method"] = method
         # Separate verdict for the measured value, next to the
@@ -1445,6 +2226,41 @@ def verify_step(freecadcmd, step_path, output_dir):
         "size_z": tess_z[1] - tess_z[0],
         "cyl_diams": cyl_diams,
     }
+
+
+def run_read_features(freecadcmd, fcstd_path, output_dir):
+    """Run read_features.py under freecadcmd on a .fcstd file.
+
+    Returns the features.json dict, or None when the dump is missing
+    or carries an error. Same env-var pattern as measure_step.py:
+    freecadcmd exits 0 even on macro errors, so the output file is
+    the only trustworthy signal.
+    """
+    script_dir = Path(__file__).resolve().parent
+    script = script_dir / "read_features.py"
+    if not script.is_file():
+        return None
+    features_path = output_dir / "features.json"
+    log_path = output_dir / "features_log.txt"
+    env = dict(os.environ)
+    env["FCSTD_PATH"] = str(fcstd_path)
+    env["FEATURES_OUT"] = str(features_path)
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_file:
+            subprocess.run([freecadcmd, str(script)],
+                           stdout=log_file, stderr=subprocess.STDOUT,
+                           env=env, timeout=600)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not features_path.is_file():
+        return None
+    try:
+        data = json.loads(features_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if data.get("error"):
+        return None
+    return data
 
 
 def append_log(path, text):
@@ -1931,6 +2747,9 @@ def main(argv=None):
         # render_preview_pil.py (Pillow+numpy, always present here).
         preview_iso = output_dir / "preview_iso.png"
         preview_main = output_dir / "preview_main.png"
+        preview_front = output_dir / "preview_front.png"
+        preview_top = output_dir / "preview_top.png"
+        preview_side = output_dir / "preview_side.png"
         tris_path = output_dir / "tris.json"
         render_scripts = [
             Path(__file__).resolve().parent / "render_preview.py",
@@ -1944,7 +2763,9 @@ def main(argv=None):
             try:
                 preview_result = subprocess.run(
                     [sys.executable, str(render_script), str(tris_path),
-                     str(preview_iso), str(preview_main)],
+                     str(preview_iso), str(preview_main),
+                     str(preview_front), str(preview_top),
+                     str(preview_side)],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     timeout=300, text=True)
                 if preview_iso.is_file() and preview_main.is_file():
@@ -1962,19 +2783,47 @@ def main(argv=None):
             report_lines.append(f"Previews: unavailable ({preview_note})")
         # Drawing-vs-modeling matching table (matching.json + report
         # lines). Drawing values are the LLM's reading from the
-        # drawing (macro parameters, plus D-dimensions from --text
-        # when present); modeling values are measured from STEP.
+        # drawing (D-dimensions from --text when present). Modeling
+        # values are read from the .fcstd feature dump via the
+        # macro's FEATURE_MAP (see MAPPING_DESIGN.md); a dimension
+        # without a mapping entry shows ?, never a guessed value.
         try:
+            mapping, map_warn = extract_feature_map(macro_text)
+            (output_dir / "mapping.json").write_text(
+                json.dumps(mapping, indent=2, ensure_ascii=False),
+                encoding="utf-8")
+            if map_warn:
+                report_lines.append(f"Mapping: {map_warn}")
+            features_data = run_read_features(args.freecadcmd, fcstd_path,
+                                              output_dir)
+            if features_data is None:
+                report_lines.append(
+                    "Mapping: features unreadable (modeling rows "
+                    "will show ?)")
+            try:
+                d_ids = {d["id"] for d in
+                         parse_numbered_dimensions(args.text or "")}
+                extra = sorted(set(mapping) - d_ids)
+                if extra:
+                    report_lines.append(
+                        "Mapping: entries without a D-row (ignored): "
+                        + ", ".join(extra))
+            except Exception:
+                pass
             matching_rows = build_matching(verification, macro_text,
-                                           args.text)
+                                           args.text, mapping=mapping,
+                                           features=features_data)
             (output_dir / "matching.json").write_text(
                 json.dumps(matching_rows, indent=2, ensure_ascii=False),
                 encoding="utf-8")
             for row in matching_rows:
+                method = row.get("modeling_method")
+                method_txt = f" | via {method}" if method else ""
                 report_lines.append(
                     f"Matching: {row['no']} | {row['item']} | "
                     f"drawing={row['drawing']} | "
-                    f"modeling={row['modeling']} | {row['result']}")
+                    f"modeling={row['modeling']} | {row['result']}"
+                    f"{method_txt}")
         except Exception as exc:
             report_lines.append(f"Matching: unavailable ({exc})")
         if questions:

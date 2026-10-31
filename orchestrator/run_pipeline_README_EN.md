@@ -80,23 +80,26 @@ The word "success" is no longer used. The gate is only STEP
 solids == 1 and valid True, and the result is "RESULT: MODELING
 COMPLETE". It does NOT mean "same as the drawing". The matching
 table goes to matching.json and as lines in report.txt. Drawing
-values are the LLM's reading from the drawing (macro parameters,
-ask-first D-dimensions, confirmed answers). Modeling values resolve
-per row, in order: (1) a macro parameter whose name shares a word
-with the dimension (slot width, tip height, ...), (2) STEP cylinder
-faces for diameters/radii (only if a cylinder near that size exists),
-(3) whole-part size X for total/overall/axial lengths. Width/height
-words are NOT compared to whole-part bbox sizes: they are
-view-dependent and often local, so without a matching macro parameter
-they show ? instead of a bogus X. Reference dimensions (parenthesized
-on the drawing) show "? (참조치수)". D-dimensions carry a view tag
-([front]/[section]/[side]/[top]) from ask-first through /answer to
-the table. O = within 0.01 mm, X = differs, ? = cannot be compared
-this way, ? (참조치수) = reference dimension, ~ = reference only.
-In the ask-first step, the D-dimension list goes to dimensions.json,
-and if positions exist, red numbered badges are drawn into
-drawing_numbered.png (skipped if PIL is missing or no positions;
-positions are estimates).
+values are the LLM's reading from the drawing (ask-first
+D-dimensions, confirmed answers). Modeling values come from the
+mapping: the building LLM writes a FEATURE_MAP at the top of the
+macro, one entry per dimension naming its feature, sketch, and
+kind; the pipeline saves it as mapping.json after a successful
+build and reads the table from it. Kinds: pad_length, diameter,
+radius, sketch_constraint (constraint named after the D-number),
+feature_extent, span, chamfer_size. A row without a mapping shows
+?, never a guess. Macro-text hunting, cylinder guessing, and
+whole-part length rules are retired (kept only as the legacy path
+for old folders without mapping.json). Reference dimensions
+(parenthesized on the drawing) show "? (참조치수)". D-dimensions
+carry a view tag ([front]/[section]/[side]/[top]) from ask-first
+through /answer to the table. O = within 0.01 mm, X = differs,
+? = cannot be compared this way, ? (참조치수) = reference
+dimension, ~ = reference only. In the ask-first step, the
+D-dimension list goes to dimensions.json, and if positions exist,
+red numbered badges are drawn into drawing_numbered.png (skipped
+if PIL is missing or no positions; positions are estimates and are
+never measurement input). See MAPPING_DESIGN.md for the full design.
 
 ## Design-question FAIL (questions instead of a macro)
 If the LLM answers with questions instead of a macro, the
@@ -158,26 +161,39 @@ edge lengths (with direction axis), vertex coordinate differences
 from topological vertices only, horizontal section extents (25 Z
 levels), whole-part bbox extents, and cylinder diameters.
 
-Matching rules (match_measured): diameter/radius rows use cylinders
-only; offset/position/tolerance rows are not measured (positions,
-not sizes). Other size rows take the best battery value, but rows
-with a view-determined axis (front/side/top, or depth/thickness
-words) only accept candidates on that axis or angled ones; other
-axes are excluded. Bands: axis-aligned face/section/bbox values use
+Matching rules: folders WITH a mapping use anchored measurement
+only. Each D-row is measured on its mapped feature's STEP faces.
+Feature created faces are matched against STEP faces (surface type,
+center, area, reverse tree order, each STEP face claimed once),
+and faces trimmed or merged by later features are found by
+relocation (end-plane offsets, created radii, sketch-frame bbox).
+Folders WITHOUT a mapping (old folders) use the battery fallback:
+diameter/radius rows use cylinders only; offset/position/tolerance
+rows are not measured (positions, not sizes). Other size rows take
+the best battery value, but rows with a view-determined axis
+(front/side/top, or depth/thickness words) only accept candidates
+on that axis or angled ones; other axes are excluded. Cylinder
+diameters also compete for other size rows (tight 0.05 band,
+axis-free, diameter only): a width of a round feature is its
+diameter — without this, a 16 step took the 14.5 axial length and
+a 10 boss took the 9.5 tap position.
 max(0.1, 10% of value); exact or numerous values (edges, vertex
 deltas, angled face pairs) use 0.05, because dense pools "find"
 coincidences under a loose band. The measured value has NO verdict:
 compare it with the drawing value yourself (general tolerance ±0.1,
-not the strict 0.01 table tolerance). The method (e.g. "parallel
-faces (angled)") is stored per row and shown on hover.
+not the strict 0.01 table tolerance). The method (e.g. "Pad_Step
+cylinder diameter") is stored per row and shown on hover; the
+modeling method shows on hover over the Modeling cell too.
 
-Honest gaps in v1 (shown as —, not faked): smooth curve maxima with
-no corner point (e.g. hook tip tops) have no vertex to measure from;
-tessellation points are deliberately NOT used for deltas, because
-mesh points exist near almost any value and would "confirm"
-anything. Files: measurements.json (+ measured_at), measure_log.txt,
-matching.json gains measured/measured_method per D-row, and a
-summary line is appended to report.txt.
+Honest gaps in v1 (shown as —, not faked): rows without a mapping,
+an unfound feature, or an unreadable kind. Tessellation points are
+deliberately NOT used for deltas, because mesh points exist near
+almost any value and would "confirm" anything. Curve local minima
+such as hook tips ARE measured, via span localmin mode (ordered
+curve samples' interior minima). Files: measurements.json
+(+ measured_at), measure_log.txt, matching.json gains
+measured/measured_method per D-row, and a summary line is appended
+to report.txt.
 Note: --measure also refreshes the Modeling and Result columns with
 the current matching rules when the folder still holds macro.py
 (the macro that built the model). Old result folders carry stale
