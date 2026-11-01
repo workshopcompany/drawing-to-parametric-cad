@@ -764,6 +764,8 @@ def form_page_ko():
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> 기어 부품 (체크 시에만 기어 참조 포함)</label>
     <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> 질문 먼저 (답하기 전에는 모델을 만들지 않음)</label>
+    <label><input type="checkbox" name="no_carry" value="on" style="width:auto;"> 같은 도면의 이전 답변 가져오지 않기 (처음부터 새로)</label>
+    <p class="note">기본: 같은 도면의 이전 폴더가 있으면 그 답변·윤곽점·제안을 자동으로 가져와 다시 묻지 않습니다. 같은 윤곽이면 재추적도, 폭 입력도 필요 없습니다.</p>
     <label for="api_key">Meta API 키</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
     <p class="note">키는 저장되지 않고 이번 실행에만 사용. 비우면 레포 폴더 .env 키 사용.</p>
@@ -906,6 +908,8 @@ def form_page_en():
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (assemble the prompt only)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> Gear part (gear reference included only when checked)</label>
     <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> Ask questions first (no model until you answer)</label>
+    <label><input type="checkbox" name="no_carry" value="on" style="width:auto;"> Don't reuse previous answers for the same drawing (start truly from scratch)</label>
+    <p class="note">Default: when a previous folder holds the same drawing, its answers, outline points and proposal are carried over automatically, so nothing is re-asked. With the same outline, no re-trace and no width entry are needed.</p>
     <label for="api_key">Meta API key</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
     <p class="note">Key is not stored, used only for this run. Empty means use the repo folder .env key.</p>
@@ -1630,6 +1634,37 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
                 f"<div class=\"card\"><h3>💡 Outline proposal "
                 f"(from the program — confirm with Q0)</h3>"
                 f"<p>{html.escape(_proposal_text)}</p></div>")
+    # Carry-over card (Nov 1, 2026 fresh-start rule): when this
+    # folder inherited work from a same-drawing folder, say so
+    # plainly — where the head start came from. A carried
+    # proposal shows only when this run wrote no fresh one.
+    carried_card = ""
+    _carried_file = output_dir / "carried_from.txt"
+    if _carried_file.is_file():
+        try:
+            _carried_text = _carried_file.read_text(
+                encoding="utf-8", errors="replace").strip()
+        except OSError:
+            _carried_text = ""
+        if _carried_text:
+            carried_card = (
+                f"<div class=\"card\"><h3>♻️ Carried over from a "
+                f"previous run (same drawing — not re-asked)</h3>"
+                f"<pre>{html.escape(_carried_text)}</pre></div>")
+    if not proposal_card:
+        _carried_prop = output_dir / "carried_outline_proposal.txt"
+        if _carried_prop.is_file():
+            try:
+                _cp_text = _carried_prop.read_text(
+                    encoding="utf-8", errors="replace").strip()
+            except OSError:
+                _cp_text = ""
+            if _cp_text:
+                proposal_card = (
+                    f"<div class=\"card\"><h3>💡 Outline proposal "
+                    f"(carried from the previous run — confirm "
+                    f"with Q0)</h3>"
+                    f"<p>{html.escape(_cp_text)}</p></div>")
     if questions_valid:
         banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
     elif questions_text.strip():
@@ -1713,6 +1748,24 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       {'<button type="submit" formaction="/suggest" formmethod="post">' + tr(lang, 'suggest_btn') + '</button><p class="note">' + tr(lang, 'suggest_note') + '</p>' if questions_valid else ''}
       </form></div>"""
 
+    # Fresh-start form (Nov 1, 2026 user rule): one button starts
+    # a NEW timestamped folder with this folder's drawing +
+    # outline, carrying its answers/points/proposal. The old
+    # folder is untouched; this is not a patch or a rerun.
+    fresh_start_form = f"""
+      <div class="card"><h3>🆕 Fresh start with this drawing + outline</h3>
+      <p class="note">Starts a NEW folder from scratch with the same drawing and outline. Previous answers, outline points and proposal are carried over automatically, so nothing is re-asked. The current folder stays as it is.</p>
+      <form action="/fresh-start" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="dir" value="{dir_query}">
+      <input type="hidden" name="lang" value="{lang}">
+      <label for="freecadcmd_fresh">freecadcmd</label>
+      <input type="text" id="freecadcmd_fresh" name="freecadcmd" value="freecadcmd">
+      <label for="api_key_fresh">Meta API key</label>
+      <input type="password" id="api_key_fresh" name="api_key" autocomplete="off">
+      <p class="note">{tr(lang, 'key_note')}</p>
+      <button type="submit">Fresh start</button>
+      </form></div>"""
+
     def view_link(name):
         query = urllib.parse.urlencode({"dir": str(output_dir), "file": name})
         return f"/view?{query}"
@@ -1724,6 +1777,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
                 image_files.append(path.name)
     input_images = [n for n in image_files
                     if n.startswith("input_drawing") or n.startswith("input_outline")]
+    overlay_images = [n for n in image_files
+                      if n.startswith("outline_traced_overlay")]
     previews = [n for n in image_files if n.startswith("preview_")]
 
     # Pill summary from report.txt (verification line, if present).
@@ -1752,6 +1807,11 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
     else:
         t1_cards = (f"<div class=\"card\"><p class=\"note\">"
                     f"{tr(lang, 'input_none')}</p></div>")
+    if overlay_images:
+        t1_cards += "".join(
+            img_card(n, "Traced outline over the outline image — "
+                        "check the alignment before building.")
+            for n in overlay_images)
     if previews:
         t2_cards = "".join(
             img_card(n, tr(lang, "preview_caption"))
@@ -2165,8 +2225,10 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
     <div class="tab-panel{' active' if _active_tab == 'r4' else ''}" id="r4">
       <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_display) if questions_display else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
       {proposal_card}
+      {carried_card}
       {draft_notice}
       {answer_form}
+      {fresh_start_form}
       <div class="grid2">
         <div class="card"><h3>{tr(lang, 'report_title')}</h3><pre>{html.escape(report_text) if report_text else tr(lang, 'report_none')}</pre></div>
         <div class="card"><h3>{tr(lang, 'guidance_title')}</h3><pre>{html.escape(guidance_text) if guidance_text else tr(lang, 'guidance_none')}</pre></div>
@@ -2355,7 +2417,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest", "/build-table", "/trace"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest", "/build-table", "/trace", "/fresh-start"):
             self.send_error(404, "Not found")
             return
         try:
@@ -2378,6 +2440,38 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         lang = pick_lang(fields.get("lang", ""))
+        if parsed.path == "/fresh-start":
+            # Fresh start (Nov 1, 2026 user rule): same drawing +
+            # outline into a NEW timestamped folder, with the
+            # previous folder as --carry-from. The old folder is
+            # untouched. Translated into a /run submission below:
+            # drawing/outline bytes come from the previous folder,
+            # ask-first is on (confirm the proposal, then build),
+            # and the pipeline carries qa/points/proposal.
+            raw_dir = fields.get("dir", "")
+            try:
+                prev_dir = Path(raw_dir).resolve()
+            except OSError:
+                prev_dir = None
+            if prev_dir is None or not prev_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            drawings = sorted(prev_dir.glob("input_drawing.*"))
+            if not drawings:
+                data = error_page(tr(lang, "err_prev_no_drawing"), lang=lang)
+                self._send_html(400, data)
+                return
+            drawing_path = drawings[0]
+            files["drawing"] = (drawing_path.name, drawing_path.read_bytes())
+            outlines = sorted(prev_dir.glob("input_outline.*"))
+            if outlines:
+                outline_path = outlines[0]
+                files["outline"] = (outline_path.name,
+                                    outline_path.read_bytes())
+            fields["ask_first"] = "on"
+            fields["_carry_from"] = str(prev_dir)
+            parsed = parsed._replace(path="/run")
         if parsed.path == "/measure":
             # Real measurement: no API call, no rebuild. Runs
             # run_pipeline.py --measure on the folder's model.step,
@@ -3109,6 +3203,10 @@ class Handler(BaseHTTPRequestHandler):
             notes = fields.get("notes", "").strip()
             if notes:
                 command += ["--text", notes]
+            if fields.get("_carry_from"):
+                command += ["--carry-from", fields["_carry_from"]]
+            if fields.get("no_carry") == "on":
+                command.append("--no-carry")
             if fields.get("gear") == "on":
                 command.append("--gear")
             if ask_first:

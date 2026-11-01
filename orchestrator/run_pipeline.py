@@ -47,6 +47,7 @@ environment error (missing key, missing file, missing freecadcmd).
 import argparse
 import ast
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -192,9 +193,13 @@ def outline_proposal_instruction(has_points):
         "<one paragraph: which feature/profile the outline "
         "defines; which shape decisions it settles — profile "
         "curve, overall outline size, notch/slot positions "
-        "and directions, lowest points on each side; and what "
-        "it does NOT decide — extrusion thickness, base/lower "
-        "section shape, and any feature not visible in the "
+        "and directions, lowest points on each side; how the "
+        "slots are handled — top-open notches in the outline "
+        "ARE the slots themselves, already in the profile, "
+        "not separate pockets (drawing dimensions only "
+        "sharpen their width/angle); and what it does NOT "
+        "decide — extrusion thickness, base/lower section "
+        "shape, and any feature not visible in the "
         "outline>\n"
         "Then, as the FIRST question line:\n"
         "Q0: <one single line, max 500 chars: 'Use the "
@@ -3790,6 +3795,168 @@ def load_outline_points(output_dir):
     return data
 
 
+def md5_file(path):
+    """md5 hex of a file, or '' when unreadable."""
+    try:
+        h = hashlib.md5()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def find_same_drawing_folder(drawing_path, output_dir):
+    """Same-drawing sibling folder to carry from, or None.
+
+    Fresh-start convenience (Nov 1, 2026 user rule): a new folder
+    for the same drawing must not start from zero. The match is
+    by file md5, never by name or date, and never across
+    different drawings. Sibling folders only (the parent of the
+    new output dir); the new dir itself is excluded. Returns
+    (folder, any_match): folder is the NEWEST match that actually
+    holds reusable work (qa_history, outline points, or a
+    proposal) — a newest-but-empty folder (inputs saved, run
+    failed before ask-first) must not shadow an older folder
+    that has the answers. any_match says whether ANY same-
+    drawing folder exists at all, so the caller can report
+    "found, but nothing reusable" instead of silence.
+    """
+    target = md5_file(drawing_path)
+    if not target:
+        return (None, False)
+    parent = Path(output_dir).parent
+    if not parent.is_dir():
+        return (None, False)
+    candidates = []
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return (None, False)
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            if entry.resolve() == Path(output_dir).resolve():
+                continue
+        except OSError:
+            continue
+        for cand in sorted(entry.glob("input_drawing.*")):
+            if md5_file(cand) == target:
+                try:
+                    candidates.append((entry.stat().st_mtime, entry))
+                except OSError:
+                    pass
+                break
+    if not candidates:
+        return (None, False)
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    # Priority: answers first. The user's own words are the
+    # hardest to reproduce, so the newest folder WITH answers
+    # wins over a newer points-only folder (e.g. a trace-only
+    # run) that would otherwise shadow them. Points/proposal
+    # ride along when the winning folder has them; otherwise
+    # the new run re-traces (width from Q0, as before).
+    for _mtime, folder in candidates:
+        if ((folder / "qa_history.txt").is_file()
+                or (folder / "carried_qa_history.txt").is_file()):
+            return (folder, True)
+    for _mtime, folder in candidates:
+        if ((folder / "outline_points.json").is_file()
+                or (folder / "outline_proposal.txt").is_file()
+                or (folder / "carried_outline_proposal.txt").is_file()):
+            return (folder, True)
+    return (None, True)
+
+
+def apply_carry_over(output_dir, source_dir, with_points=True):
+    """Copy reusable work from a same-drawing folder into a new one.
+
+    Carried, verbatim, never reinterpreted: qa_history.txt (the
+    user's own previous answers — the new run must NOT re-ask
+    them), outline_points.json + outline_traced_overlay.png
+    (traced numbers are drawing properties, not per-folder
+    work), outline_proposal.txt (the program's previous
+    proposal, kept as context). Each item is copied only when
+    the source file is valid; a broken source file is skipped
+    with a note, never copied blindly. Returns a dict of what
+    was carried; also writes carried_from.txt so the result
+    page can show exactly where the new run's head start came
+    from. The new run's own ask-first response still writes its
+    own outline_proposal.txt / questions.txt afterwards.
+    """
+    carried = {"source": Path(source_dir).name, "qa_text": "",
+               "points": None, "proposal": "", "items": []}
+    src = Path(source_dir)
+    out = Path(output_dir)
+    # Chain rule: a folder that itself only CARRIED answers (a
+    # dry-run or a fresh start that never got its own answers)
+    # still passes those answers on — otherwise the chain
+    # breaks after one fresh start.
+    qa_path = src / "qa_history.txt"
+    if not qa_path.is_file():
+        qa_path = src / "carried_qa_history.txt"
+    if qa_path.is_file():
+        try:
+            text = qa_path.read_text(encoding="utf-8",
+                                     errors="replace").strip()
+        except OSError:
+            text = ""
+        if text:
+            carried["qa_text"] = text
+            try:
+                (out / "carried_qa_history.txt").write_text(
+                    text + "\n", encoding="utf-8")
+                carried["items"].append("qa_history")
+            except OSError:
+                pass
+    pts = load_outline_points(src) if with_points else None
+    if pts is not None:
+        try:
+            (out / "outline_points.json").write_text(
+                json.dumps(pts, indent=1, ensure_ascii=False),
+                encoding="utf-8")
+            carried["points"] = pts
+            carried["items"].append(
+                f"outline_points ({len(pts.get('points_mm') or [])} points)")
+        except OSError:
+            carried["points"] = None
+        overlay = src / "outline_traced_overlay.png"
+        if overlay.is_file():
+            try:
+                shutil.copyfile(overlay,
+                                out / "outline_traced_overlay.png")
+                carried["items"].append("outline_traced_overlay.png")
+            except OSError:
+                pass
+    prop_path = src / "outline_proposal.txt"
+    if not prop_path.is_file():
+        prop_path = src / "carried_outline_proposal.txt"
+    if prop_path.is_file():
+        try:
+            text = prop_path.read_text(encoding="utf-8",
+                                       errors="replace").strip()
+        except OSError:
+            text = ""
+        if text:
+            carried["proposal"] = text
+            try:
+                (out / "carried_outline_proposal.txt").write_text(
+                    text + "\n", encoding="utf-8")
+                carried["items"].append("outline_proposal")
+            except OSError:
+                pass
+    try:
+        (out / "carried_from.txt").write_text(
+            f"Source folder: {carried['source']}\n"
+            f"Carried: {', '.join(carried['items']) if carried['items'] else 'nothing (source had no reusable files)'}\n",
+            encoding="utf-8")
+    except OSError:
+        pass
+    return carried
+
+
 def format_outline_points_text(data):
     """Prompt section carrying traced outline points as numbers.
 
@@ -3809,6 +3976,14 @@ def format_outline_points_text(data):
                  "order, closing back to the first point. Do NOT "
                  "invent other coordinates for that feature, do "
                  "NOT flip X/Y, do NOT mirror it.")
+    lines.append(
+        "SLOT RULE: top-open notches in this outline ARE the "
+        "slots — the profile already contains them, so do NOT "
+        "add separate Pocket features for them (a pocket over "
+        "an existing notch cuts nothing). Sharpen notch width "
+        "and angle to the drawing dimensions; only when the "
+        "outline is an outer envelope WITHOUT notches should "
+        "slots be cut as separate Pockets.")
     if data.get("bottom_cropped"):
         lines.append("WARNING: the outline image bottom is cropped "
                      "(green touches the image edge), so Y = 0 is "
@@ -4758,6 +4933,13 @@ def parse_args(argv=None):
                         "--outline-width-mm; snap-tool JSON "
                         "carries its own scale. No rebuild, no "
                         "API call, model/macro/report unchanged.")
+    parser.add_argument("--carry-from", default="",
+                        help="Previous run folder for the same drawing: "
+                        "its qa_history, outline points and proposal "
+                        "are carried into this fresh run.")
+    parser.add_argument("--no-carry", action="store_true",
+                        help="Do not auto-carry from a same-drawing "
+                        "folder; start truly from scratch.")
     parser.add_argument("--outline-width-mm", type=float, default=None,
                         help="Real width (mm) of the outline image "
                         "for tracing: scale = width / outline "
@@ -4848,6 +5030,42 @@ def main(argv=None):
     drawing_path = Path(args.drawing)
     if not drawing_path.is_file():
         die(f"drawing file not found: {drawing_path}")
+    # Fresh-start carry-over (Nov 1, 2026 user rule): a new folder
+    # for the SAME drawing inherits the previous folder's answers,
+    # traced outline points and proposal, so the user is never
+    # re-asked from scratch (the 225144 -> 002938 loss). Explicit
+    # --carry-from wins; otherwise the newest same-drawing
+    # sibling is auto-found, unless --no-carry opts out. An
+    # explicit folder whose drawing differs is ignored, never
+    # trusted — a wrong carry is worse than no carry.
+    carried = None
+    carry_source = None
+    if args.carry_from:
+        _cand = Path(args.carry_from)
+        if _cand.is_dir() and any(
+                md5_file(f) == md5_file(drawing_path)
+                for f in _cand.glob("input_drawing.*")):
+            carry_source = _cand
+        else:
+            report_lines.append(
+                "Carry-over: --carry-from ignored (folder missing "
+                "or different drawing).")
+    elif not args.no_carry:
+        _found, _any_match = find_same_drawing_folder(
+            drawing_path, output_dir)
+        carry_source = _found
+        if carry_source is None and _any_match:
+            report_lines.append(
+                "Carry-over: same drawing folder found, but it "
+                "holds no reusable answers, points or proposal.")
+    if carry_source is not None:
+        carried = apply_carry_over(output_dir, carry_source,
+                                   with_points=bool(args.outline))
+        report_lines.append(
+            f"Carried from {carried['source']}: "
+            f"{', '.join(carried['items']) if carried['items'] else 'nothing reusable'}.")
+    elif args.no_carry:
+        report_lines.append("Carry-over: disabled (--no-carry).")
     principles_text = load_text(args.principles, "principles file")
 
     gear_text = ""
@@ -4908,7 +5126,64 @@ def main(argv=None):
     # is best-effort here: a trace failure never fails the
     # build, it just leaves the image-only behaviour + a note.
     outline_points_data = None
-    if args.outline and outline_suffix.lower() == ".json":
+    _carried_points = (carried or {}).get("points")
+    if args.outline and outline_image is not None \
+            and _carried_points is not None \
+            and outline_suffix.lower() != ".json":
+        # Same outline image as the carried folder -> reuse its
+        # traced numbers exactly (no re-trace, no width needed).
+        # Different outline image, same drawing -> re-trace it,
+        # with the width given, or else the previous run's
+        # traced width (the width is a property of the part,
+        # not of the image). A failed re-trace falls back to
+        # image-only — never to the OLD outline's points.
+        _same_outline = False
+        _new_md5 = md5_file(outline_path)
+        if _new_md5:
+            for _pat in ("outline_input.*", "input_outline.*"):
+                for _cand in sorted(carry_source.glob(_pat)):
+                    if md5_file(_cand) == _new_md5:
+                        _same_outline = True
+                        break
+                if _same_outline:
+                    break
+        if _same_outline:
+            outline_points_data = _carried_points
+            report_lines.append(
+                f"Outline points: carried from {carried['source']} "
+                "(same outline image, no re-trace, no width needed).")
+        else:
+            _w = args.outline_width_mm
+            _w_note = "given width"
+            if _w is None:
+                _xs = [p[0] for p in
+                       (_carried_points.get("points_mm") or [])]
+                if _xs:
+                    _w = max(_xs) - min(_xs)
+                    _w_note = "width reused from previous run"
+            if _w is None:
+                report_lines.append(
+                    "Outline trace: no width given and none "
+                    "reusable; continuing with the outline image only.")
+            else:
+                try:
+                    if run_trace_outline_mode(
+                            output_dir, args.freecadcmd, outline_path,
+                            _w) == 0:
+                        outline_points_data = load_outline_points(
+                            output_dir)
+                        report_lines.append(
+                            f"Outline trace: new image traced "
+                            f"({_w_note}); see trace_log.txt")
+                    else:
+                        report_lines.append(
+                            "Outline trace: FAILED (see trace_log.txt); "
+                            "continuing with the outline image only.")
+                except Exception as exc:
+                    report_lines.append(
+                        f"Outline trace: skipped ({exc}); continuing "
+                        "with the outline image only.")
+    elif args.outline and outline_suffix.lower() == ".json":
         try:
             outline_points_data = extract_outline_points_from_json(
                 outline_data)
@@ -4944,6 +5219,28 @@ def main(argv=None):
     if _points_text:
         outline_text = (outline_text + "\n\n" + _points_text
                         if outline_text else _points_text)
+
+    # Carried Q&A goes into EVERY prompt of this run (ask + build
+    # + retry, via outline_text): the ask-first step must ask
+    # ONLY what the previous answers leave undecided, never
+    # re-ask a question the user already answered for this
+    # drawing. A carried answer that conflicts with this
+    # drawing must be flagged, never silently overridden.
+    if carried and (carried.get("qa_text") or carried.get("proposal")):
+        _sec = [
+            f"PREVIOUS ANSWERS FOR THE SAME DRAWING (from folder "
+            f"{carried['source']}) — do NOT re-ask these. Ask "
+            f"ONLY what remains undecided. If a previous answer "
+            f"conflicts with this drawing, say so instead of "
+            f"silently overriding it:"]
+        if carried.get("proposal"):
+            _sec.append("Previous outline proposal: "
+                        + carried["proposal"])
+        if carried.get("qa_text"):
+            _sec.append(carried["qa_text"])
+        _sec_text = "\n".join(_sec)
+        outline_text = (outline_text + "\n\n" + _sec_text
+                        if outline_text else _sec_text)
 
     base_prompt = build_prompt(principles_text, gear_text, args.text,
                                output_dir, outline_text)
