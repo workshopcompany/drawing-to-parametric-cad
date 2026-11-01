@@ -505,8 +505,10 @@ S = {
                     "the questions repeat. The EXISTING macro.py "
                     "in THIS folder is patched only where your "
                     "answers require (1 API call, 1 FreeCAD run, no "
-                    "new folder, no regeneration); answered questions "
-                    "are removed from questions.txt, and the "
+                    "new folder, no regeneration); once answered, a "
+                    "question never comes back, even if the patch "
+                    "fails — a failed patch reports gate failures "
+                    "to fix, not the same questions. The "
                     "accumulated Q&A is updated in this folder's "
                     "qa_history.txt.",
                     "아래에 답을 적고 계속 작업을 누르면, 'Q13: 답변' "
@@ -514,8 +516,10 @@ S = {
                     "붙여넣지 마세요 — 붙여넣은 질문이 답변으로 오인돼 "
                     "질문이 반복됩니다. 이 폴더의 기존 macro.py를 답변에 "
                     "필요한 부분만 고칩니다 (API 1번, FreeCAD 1번, 새 "
-                    "폴더 없음, 전체 재생성 없음). 답변된 질문은 "
-                    "questions.txt에서 제거되고, 누적된 Q&A는 이 폴더의 "
+                    "폴더 없음, 전체 재생성 없음). 한 번 답변한 질문은 "
+                    "패치가 실패해도 다시 나오지 않습니다. 패치 실패 시 "
+                    "다음 단계는 같은 질문이 아니라 게이트 실패를 고치는 "
+                    "것입니다. 누적된 Q&A는 이 폴더의 "
                     "qa_history.txt에 업데이트됩니다."),
     "answer_label": ("Answers (one per question)",
                      "답변 (질문별로 적으세요)"),
@@ -1427,6 +1431,82 @@ def valid_questions_text(text):
     return all(_re2.match(r"Q\d+:\s+\S", ln.strip()) for ln in lines)
 
 
+def prune_answered_questions(output_dir, require_text_match=True):
+    """Remove answered questions from questions.txt, in place.
+
+    Rule (Oct 31, 2026 user correction): answering and
+    implementing are SEPARATE. A question whose answer is
+    recorded in qa_history.txt is answered, full stop — it must
+    never be shown again as pending, even if the patch that
+    tried to implement it failed (gate FAIL, API error, ...).
+    A failed patch's next step is its gate failures, not the
+    same questions. With require_text_match=True (result-page
+    display), a label is pruned only when the historical
+    question text for that label equals the current
+    questions.txt text for it, so a NEW question that reuses
+    an old label in a reused folder is never hidden. With
+    False (patch-mode /answer, where questions.txt is static
+    for the folder), label + non-question-matching answer is
+    enough. Pasted-question lines (answer == question text)
+    never count as answers. Returns the removed labels.
+    """
+    import re as _re
+    try:
+        questions_path = output_dir / "questions.txt"
+        qa_path = output_dir / "qa_history.txt"
+        if not questions_path.is_file() or not qa_path.is_file():
+            return []
+        q_text = questions_path.read_text(encoding="utf-8",
+                                          errors="replace")
+        question_dict = {}
+        for line in q_text.splitlines():
+            m = _re.match(r"\s*(Q\d+)\s*:\s*(.*)$", line.strip())
+            if m and m.group(2).strip():
+                question_dict[m.group(1)] = m.group(2).strip()
+        if not question_dict:
+            return []
+        hist_q, hist_a = {}, {}
+        mode = None
+        for line in qa_path.read_text(encoding="utf-8",
+                                      errors="replace").splitlines():
+            stripped = line.strip()
+            if stripped == "Questions:":
+                mode = "q"
+                continue
+            if stripped == "Answers:":
+                mode = "a"
+                continue
+            m = _re.match(r"(Q\d+)\s*:\s*(.*)$", stripped)
+            if m and m.group(2).strip():
+                if mode == "q":
+                    hist_q[m.group(1)] = m.group(2).strip()
+                elif mode == "a":
+                    hist_a[m.group(1)] = m.group(2).strip()
+        removed = []
+        for label, ans in hist_a.items():
+            if label not in question_dict:
+                continue
+            if ans == question_dict[label]:
+                continue
+            if require_text_match and hist_q.get(label) != question_dict[label]:
+                continue
+            removed.append(label)
+        if not removed:
+            return []
+        kept = [ln for ln in q_text.splitlines()
+                if not (_re.match(r"\s*(Q\d+)\s*:", ln)
+                        and _re.match(r"\s*(Q\d+)\s*:", ln).group(1)
+                        in removed)]
+        if kept:
+            questions_path.write_text("\n".join(kept) + "\n",
+                                      encoding="utf-8")
+        else:
+            questions_path.unlink()
+        return sorted(removed)
+    except OSError:
+        return []
+
+
 def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
     # tabbed cards for input images, 3D previews, files/downloads, QA logs.
@@ -1443,6 +1523,11 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     guidance = output_dir / "guidance.txt"
     if guidance.is_file():
         guidance_text = guidance.read_text(encoding="utf-8", errors="replace")
+    # Self-heal on display: a folder whose qa_history already
+    # answers a pending question must not show that question
+    # again (Oct 31, 2026 correction). Text-match only, so a
+    # new question reusing an old label is never hidden.
+    prune_answered_questions(output_dir, require_text_match=True)
     questions_text = ""
     questions_file = output_dir / "questions.txt"
     if questions_file.is_file():
@@ -2749,6 +2834,14 @@ class Handler(BaseHTTPRequestHandler):
                         qa_trail + "\n", encoding="utf-8")
                 except OSError:
                     pass
+            # Patch mode: answering is separate from implementing
+            # (Oct 31, 2026 correction). Once qa_history holds the
+            # answer, the question leaves pending even if this
+            # patch failed; the next step is its gate failures,
+            # never the same questions. Skip on dry-run (no change).
+            if patch_mode and not dry_run:
+                prune_answered_questions(output_dir,
+                                         require_text_match=False)
             for _name in ("dimensions.json", "drawing_numbered.png",
                          "feature_check_history.txt"):
                 _src = prev_dir / _name

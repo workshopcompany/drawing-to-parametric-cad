@@ -3387,14 +3387,24 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                                         errors="replace")[-8000:]
         except OSError:
             qa_text = ""
-    # Answered-question resolution (Oct 31, 2026 loop fix): patch
-    # mode previously NEVER touched questions.txt, so a patch that
-    # applied Q13-Q20 answers still left questions.txt listing
-    # Q13-Q20, the result page kept showing 'Questions pending',
-    # and the next Continue prefilled Q13-Q20 again. questions.txt
-    # is the banner's source of truth, so a successful patch must
-    # remove the questions it answered from it (see the cleanup
-    # after PATCH COMPLETE below).
+    # Answered-question resolution (Oct 31, 2026, CORRECTED same
+    # day): answering and implementing are SEPARATE. The first
+    # loop fix tied removal to patch SUCCESS, which was wrong:
+    # a gate-FAILED patch left questions.txt untouched, so the
+    # result page re-asked Q13-Q20 even though the user had
+    # already answered them and qa_history held the answers.
+    # Correct rule: a label with a recorded, non-question-matching
+    # answer is answered, full stop. It leaves questions.txt
+    # BEFORE the patch runs (unless dry-run), whether the patch
+    # then succeeds or fails; a failed patch's next step is its
+    # gate failures, and the next patch prompt still carries the
+    # answers via qa_history, so the LLM can retry implementing
+    # them without the user re-answering. History answers are
+    # NOT restricted to labels in this instruction: in patch
+    # mode questions.txt is static for the folder, so any label
+    # answered in qa_history is answered, even on a flip-only
+    # patch. Macro comments mentioning Q-numbers are NOT
+    # questions.txt and do not drive the banner.
     questions_path = output_dir / "questions.txt"
     question_dict = {}
     if questions_path.is_file():
@@ -3405,16 +3415,32 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
             question_dict = {}
     cleaned_text, answered_from_instructions = clean_patch_instructions(
         text, question_dict)
-    # History answers count ONLY when this patch is about those
-    # questions (their labels appear in the instructions); a
-    # direction flip must not clear unrelated pending questions.
-    labels_in_instructions = set(re.findall(r"Q\d+", text or ""))
-    answered_from_history = (
-        answered_labels_from_qa_history(qa_text, question_dict)
-        & labels_in_instructions)
+    answered_from_history = answered_labels_from_qa_history(
+        qa_text, question_dict)
     answered_labels = ((answered_from_instructions
                         | answered_from_history)
                        & set(question_dict))
+    if answered_labels and not dry_run and questions_path.is_file():
+        try:
+            _qlines = questions_path.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+            _kept = [ln for ln in _qlines
+                     if not (re.match(r"\s*(Q\d+)\s*:", ln)
+                             and re.match(r"\s*(Q\d+)\s*:", ln).group(1)
+                             in answered_labels)]
+            if _kept:
+                questions_path.write_text("\n".join(_kept) + "\n",
+                                          encoding="utf-8")
+                _log(f"PATCH: answered questions removed from "
+                     f"questions.txt (answered, even if this patch "
+                     f"later fails): {sorted(answered_labels)}; "
+                     f"remaining: {[ln.split(':')[0] for ln in _kept]}")
+            else:
+                questions_path.unlink()
+                _log(f"PATCH: all pending questions answered "
+                     f"({sorted(answered_labels)}); questions.txt removed")
+        except OSError as exc:
+            _log(f"PATCH: questions.txt cleanup failed: {exc}")
     hist_text = ""
     hist_path = output_dir / "feature_history.json"
     if hist_path.is_file():
@@ -3603,33 +3629,9 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
             _log("PATCH: features.json refreshed from patched .fcstd")
     except Exception as exc:
         _log(f"PATCH: features refresh failed (best-effort): {exc}")
-    # Answered questions leave questions.txt: a successful patch
-    # applied the answers, so the banner must stop showing them.
-    # Only labels answered in THIS patch's instructions (or its
-    # Questions section via qa_history) are removed; unanswered
-    # questions stay, so a partial answer never hides the rest.
-    # Macro comments mentioning Q-numbers are NOT questions.txt
-    # and do not drive the banner, so they are left alone.
-    if answered_labels and questions_path.is_file():
-        try:
-            _qlines = questions_path.read_text(
-                encoding="utf-8", errors="replace").splitlines()
-            _kept = [ln for ln in _qlines
-                     if not (re.match(r"\s*(Q\d+)\s*:", ln)
-                             and re.match(r"\s*(Q\d+)\s*:", ln).group(1)
-                             in answered_labels)]
-            if _kept:
-                questions_path.write_text("\n".join(_kept) + "\n",
-                                          encoding="utf-8")
-                _log(f"PATCH: resolved questions removed from "
-                     f"questions.txt: {sorted(answered_labels)}; "
-                     f"remaining: {[ln.split(':')[0] for ln in _kept]}")
-            else:
-                questions_path.unlink()
-                _log(f"PATCH: all pending questions resolved "
-                     f"({sorted(answered_labels)}); questions.txt removed")
-        except OSError as exc:
-            _log(f"PATCH: questions.txt cleanup failed: {exc}")
+    # Answered questions were already removed from questions.txt
+    # BEFORE the patch ran (see above), so nothing is left to
+    # clean up here on success; unanswered questions stay.
     report_lines = [
         "Drawing-to-Parametric-CAD orchestrator v0.1",
         "PATCH MODE: existing macro.py patched in place, 1 API call, "
