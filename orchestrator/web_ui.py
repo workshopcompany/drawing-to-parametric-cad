@@ -499,16 +499,24 @@ S = {
     "answer_title": ("✏️ Answer questions and continue work",
                     "✏️ 질문에 답하고 계속 작업"),
     "answer_note": ("Write your answers below and press Continue work: "
-                    "write only the new answers. The EXISTING macro.py "
+                    "write only the new answers, as 'Q13: answer' "
+                    "lines. Do NOT paste the questions again — "
+                    "pasted questions are mistaken for answers and "
+                    "the questions repeat. The EXISTING macro.py "
                     "in THIS folder is patched only where your "
                     "answers require (1 API call, 1 FreeCAD run, no "
-                    "new folder, no regeneration); the accumulated "
-                    "Q&A is updated in this folder's qa_history.txt.",
-                    "아래에 답을 적고 계속 작업을 누르면, 새 답변만 적으면 "
-                    "됩니다. 이 폴더의 기존 macro.py를 답변에 필요한 부분만 "
-                    "고칩니다 (API 1번, FreeCAD 1번, 새 폴더 없음, 전체 "
-                    "재생성 없음). 누적된 Q&A는 이 폴더의 qa_history.txt에 "
-                    "업데이트됩니다."),
+                    "new folder, no regeneration); answered questions "
+                    "are removed from questions.txt, and the "
+                    "accumulated Q&A is updated in this folder's "
+                    "qa_history.txt.",
+                    "아래에 답을 적고 계속 작업을 누르면, 'Q13: 답변' "
+                    "형식으로 새 답변만 적으면 됩니다. 질문을 다시 "
+                    "붙여넣지 마세요 — 붙여넣은 질문이 답변으로 오인돼 "
+                    "질문이 반복됩니다. 이 폴더의 기존 macro.py를 답변에 "
+                    "필요한 부분만 고칩니다 (API 1번, FreeCAD 1번, 새 "
+                    "폴더 없음, 전체 재생성 없음). 답변된 질문은 "
+                    "questions.txt에서 제거되고, 누적된 Q&A는 이 폴더의 "
+                    "qa_history.txt에 업데이트됩니다."),
     "answer_label": ("Answers (one per question)",
                      "답변 (질문별로 적으세요)"),
     "key_note": ("Key is not stored, used only for this run. Empty "

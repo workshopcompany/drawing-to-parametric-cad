@@ -3246,6 +3246,94 @@ def run_images_mode(output_dir, freecadcmd):
     return _finish(1)
 
 
+def parse_q_lines(text):
+    """Parse 'Q<n>:' lines into {label: text}. Multiline answers
+    are NOT joined here; callers use the first line per label."""
+    out = {}
+    for line in (text or "").splitlines():
+        match = re.match(r"\s*(Q\d+)\s*:\s*(.*)$", line.strip())
+        if match and match.group(2).strip():
+            out[match.group(1)] = match.group(2).strip()
+    return out
+
+
+def clean_patch_instructions(text, question_dict=None):
+    """De-duplicate a patch instruction that pasted questions as
+    answers (Oct 31, 2026 home case, patch_prompt.txt).
+
+    The web answer form prefills only 'Q13:' labels, but a user
+    who pastes questions.txt into the answer box produces:
+      Questions: Q13..Q20
+      Answers: Q13..Q20 (the questions again)
+      Answers: Q13..Q20 (the real answers)
+    An LLM given that as 'modification instructions' sees the
+    questions as if they were answers, and the real answers
+    buried after a second 'Answers:' header. Fix: keep the
+    Questions section for reference, keep ONLY the LAST
+    'Answers:' section, and drop any answer line that exactly
+    matches its question line. Returns (cleaned_text,
+    answered_labels) where answered_labels are Q labels with a
+    non-empty answer that differs from the question text.
+    """
+    question_dict = question_dict or {}
+    lines = (text or "").splitlines()
+    # Split on lines that are exactly 'Answers:' (allow trailing
+    # spaces / CR from Windows pastes).
+    sections = []
+    current = []
+    for line in lines:
+        if line.strip() == "Answers:":
+            sections.append(current)
+            current = []
+        else:
+            current.append(line)
+    sections.append(current)
+    if len(sections) <= 1:
+        # No 'Answers:' header at all: plain instruction text.
+        # Still parse Q-label lines as answers for cleanup.
+        answers = parse_q_lines(text)
+        answered = {label for label, ans in answers.items()
+                    if ans and ans != question_dict.get(label)}
+        return text, answered
+    # sections[0] = everything before the first Answers: (usually
+    # the Questions: block). sections[-1] = the last Answers:
+    # block, which is the real answers when duplicated.
+    questions_part = "\n".join(sections[0]).strip()
+    last_answers_lines = sections[-1]
+    kept = []
+    for line in last_answers_lines:
+        stripped = line.strip()
+        match = re.match(r"(Q\d+)\s*:\s*(.*)$", stripped)
+        if match and question_dict.get(match.group(1)) == match.group(2).strip():
+            continue
+        kept.append(line)
+    answers_text = "\n".join(kept).strip()
+    answers = parse_q_lines(answers_text)
+    answered = {label for label, ans in answers.items()
+                if ans and ans != question_dict.get(label)}
+    cleaned = ""
+    if questions_part:
+        cleaned += questions_part + "\n"
+    cleaned += "Answers (apply these, do not re-ask them):\n" + answers_text
+    return cleaned, answered
+
+
+def answered_labels_from_qa_history(qa_text, question_dict):
+    """Q labels answered in qa_history.txt (last Answers: section
+    per round, real answers only, not pasted question lines)."""
+    if not qa_text:
+        return set()
+    # Reuse the same de-duplication: split the whole history on
+    # 'Answers:' and parse every section after the first, but a
+    # pasted-questions section is dropped by the exact-match rule.
+    answers = {}
+    for part in qa_text.split("Answers:"):
+        for label, ans in parse_q_lines(part).items():
+            if ans and ans != question_dict.get(label):
+                answers[label] = ans
+    return set(answers)
+
+
 def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                    dry_run):
     """Patch the existing macro.py in place — no regeneration.
@@ -3299,6 +3387,34 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                                         errors="replace")[-8000:]
         except OSError:
             qa_text = ""
+    # Answered-question resolution (Oct 31, 2026 loop fix): patch
+    # mode previously NEVER touched questions.txt, so a patch that
+    # applied Q13-Q20 answers still left questions.txt listing
+    # Q13-Q20, the result page kept showing 'Questions pending',
+    # and the next Continue prefilled Q13-Q20 again. questions.txt
+    # is the banner's source of truth, so a successful patch must
+    # remove the questions it answered from it (see the cleanup
+    # after PATCH COMPLETE below).
+    questions_path = output_dir / "questions.txt"
+    question_dict = {}
+    if questions_path.is_file():
+        try:
+            question_dict = parse_q_lines(questions_path.read_text(
+                encoding="utf-8", errors="replace"))
+        except OSError:
+            question_dict = {}
+    cleaned_text, answered_from_instructions = clean_patch_instructions(
+        text, question_dict)
+    # History answers count ONLY when this patch is about those
+    # questions (their labels appear in the instructions); a
+    # direction flip must not clear unrelated pending questions.
+    labels_in_instructions = set(re.findall(r"Q\d+", text or ""))
+    answered_from_history = (
+        answered_labels_from_qa_history(qa_text, question_dict)
+        & labels_in_instructions)
+    answered_labels = ((answered_from_instructions
+                        | answered_from_history)
+                       & set(question_dict))
     hist_text = ""
     hist_path = output_dir / "feature_history.json"
     if hist_path.is_file():
@@ -3336,8 +3452,12 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
         "enough surrounding lines to make it unique. Keep each "
         "replacement as small as possible: one feature, one "
         "direction flip, one value, one position — never the "
-        "whole file.\n\n"
-        f"Modification instructions:\n{text}\n\n"
+        "whole file.\n"
+        "The instructions below are ANSWERS to questions, not new "
+        "questions. Apply them to the provisional values they "
+        "answer and do NOT re-ask them, do NOT leave them as "
+        "provisional values.\n\n"
+        f"Modification instructions:\n{cleaned_text}\n\n"
         + (f"{hist_text}\n\n" if hist_text else "")
         + (f"Previous guidance:\n{guidance_text}\n\n" if guidance_text else "")
         + (f"Q&A history (user-confirmed; do not contradict it):\n"
@@ -3483,6 +3603,33 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
             _log("PATCH: features.json refreshed from patched .fcstd")
     except Exception as exc:
         _log(f"PATCH: features refresh failed (best-effort): {exc}")
+    # Answered questions leave questions.txt: a successful patch
+    # applied the answers, so the banner must stop showing them.
+    # Only labels answered in THIS patch's instructions (or its
+    # Questions section via qa_history) are removed; unanswered
+    # questions stay, so a partial answer never hides the rest.
+    # Macro comments mentioning Q-numbers are NOT questions.txt
+    # and do not drive the banner, so they are left alone.
+    if answered_labels and questions_path.is_file():
+        try:
+            _qlines = questions_path.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+            _kept = [ln for ln in _qlines
+                     if not (re.match(r"\s*(Q\d+)\s*:", ln)
+                             and re.match(r"\s*(Q\d+)\s*:", ln).group(1)
+                             in answered_labels)]
+            if _kept:
+                questions_path.write_text("\n".join(_kept) + "\n",
+                                          encoding="utf-8")
+                _log(f"PATCH: resolved questions removed from "
+                     f"questions.txt: {sorted(answered_labels)}; "
+                     f"remaining: {[ln.split(':')[0] for ln in _kept]}")
+            else:
+                questions_path.unlink()
+                _log(f"PATCH: all pending questions resolved "
+                     f"({sorted(answered_labels)}); questions.txt removed")
+        except OSError as exc:
+            _log(f"PATCH: questions.txt cleanup failed: {exc}")
     report_lines = [
         "Drawing-to-Parametric-CAD orchestrator v0.1",
         "PATCH MODE: existing macro.py patched in place, 1 API call, "
