@@ -28,6 +28,8 @@ Terminology: use "empty hole" for a hole, never "void".
 - Ask the user only about design/dimensions that only the user knows. Do NOT ask the user about
   FreeCAD implementation methods (placement method, API names, constraint names) — those are
   program rules below, decide them internally.
+- Exception — tolerances are NEVER a user question (Nov 1, 2026 user rule, see Principle 7).
+  Do not ask how to interpret a tolerance, which limit to use, or whether to apply it.
 
 ### Failure-finding method
 
@@ -122,6 +124,25 @@ Terminology: use "empty hole" for a hole, never "void".
 - On conflict, do not follow vision; flag it.
 - A dimension the LLM infers from the drawing alone must be labelled inferred.
   - Do not present an inferred dimension as a confirmed dimension.
+
+### Tolerances are never modelled, never asked about (Nov 1, 2026 user rule)
+
+- Model with NOMINAL dimensions only. A tolerance on the drawing is product dimension
+  management / inspection — it is NOT a modelling instruction and it NEVER changes a
+  sketch or feature value.
+- This covers every tolerance form: ± / +/− values, limit dimensions, a general tolerance
+  note, and geometric tolerances (parallelism, perpendicularity, flatness, and the like).
+- Never shift a dimension to a tolerance limit. Never model a maximum/minimum material
+  condition. Never add clearance for a tolerance.
+- Never ask the user about a tolerance: not its interpretation, not which limit to use,
+  not whether to apply it. Use the nominal value printed on the drawing.
+  - If only limit dimensions are printed with no nominal (e.g. 21.97–22.03), use the
+    midpoint (22.00) and label it inferred. Still no question.
+  - A geometric tolerance is satisfied by building the nominal geometry correctly
+    (parallel faces parallel, perpendicular faces perpendicular) — never by asking,
+    and never by offsetting geometry.
+- A tolerance value may still appear in a matching table as a reference (NOTE) row, but
+  it never changes a sketch/feature value.
 
 ## 8. Stack / order
 

@@ -3919,8 +3919,15 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
     answer source: it says how to build, not what this part's
     dimensions are, so it must not be used to invent a value.
     If drawing + history + results do not decide a question,
-    the draft answer is "결정 필요: <options>" with confidence
-    결정필요 — never a fake certainty.
+    the draft answer is "Needs decision: <options>" with
+    confidence needs-decision — never a fake certainty.
+    Draft answers are in ENGLISH (Nov 1, 2026 user rule: the
+    draft must be usable by other people and by hackathon
+    evaluators; the user translates it himself if he needs
+    to). A pending question about a tolerance is always
+    drafted as "ignore the tolerance, model the nominal
+    value" (see the principles' tolerance rule) — a
+    tolerance is never a decision the user has to make.
     """
     log_lines = []
 
@@ -4000,7 +4007,17 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
         "You are drafting SUGGESTED answers to pending questions "
         "about a part drawing. You are NOT building anything and "
         "you are NOT deciding anything: the user will edit and "
-        "confirm your draft before it is used. Answer in Korean.\n\n"
+        "confirm your draft before it is used. Answer in ENGLISH "
+        "— every answer line and every Notes line must be in "
+        "English, even if the pending question was written in "
+        "another language.\n\n"
+        "Tolerance rule: tolerances are NEVER modelled and NEVER "
+        "a user decision. If a pending question is about a "
+        "tolerance (a ± value, a limit, a general tolerance "
+        "note, or a geometric tolerance), draft the answer as "
+        "ignoring the tolerance and modelling the nominal "
+        "dimension, stating the nominal value — never ask the "
+        "user which limit to use.\n\n"
         "Sources, in priority order: (1) the drawing image and "
         "the numbered dimensions below, (2) the Q&A history "
         "below — already-decided answers MUST NOT be contradicted; "
@@ -4015,16 +4032,16 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
         "says so.\n\n"
         "Output EXACTLY two sections, nothing else:\n"
         "Answers:\n"
-        "Q<n>: <one short answer in Korean, with numbers and units>\n"
+        "Q<n>: <one short answer in English, with numbers and units>\n"
         "(one line per question, every question covered, in the "
         "same order as the questions)\n"
         "Notes:\n"
         "Q<n>: <source: drawing / Q&A history / current result / "
         "calculation / standard> — <one short sentence> — "
-        "확신: 확실 / 계산 / 추측 / 결정필요\n"
+        "confidence: certain / calculated / guessed / needs-decision\n"
         "If drawing + history + results do not decide a question, "
-        "its answer MUST be '결정 필요: <options>' and its "
-        "confidence 결정필요. Never present a guess as certain.\n\n"
+        "its answer MUST be 'Needs decision: <options>' and its "
+        "confidence needs-decision. Never present a guess as certain.\n\n"
         f"Pending questions:\n{questions_text}\n\n"
         + (f"Numbered dimensions:\n{dims_text}\n\n" if dims_text else "")
         + (f"Q&A history (already decided):\n{qa_text}\n\n"
