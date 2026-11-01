@@ -420,6 +420,22 @@ S = {
                         "바뀌지 않았습니다."),
     "err_flip_nofeature": ("Pick a feature to flip.",
                            "뒤집을 피처를 선택하세요."),
+    "err_suggest_noquestions": ("No pending questions in this folder to suggest answers for.",
+                                "이 폴더에 답변 초안을 만들 미답변 질문이 없습니다."),
+    "err_suggest_failed": ("Answer suggestion failed. See suggest_log.txt in the folder. Nothing was built or changed.",
+                           "답변 초안 만들기에 실패했습니다. 폴더의 suggest_log.txt를 보세요. 아무것도 만들거나 바꾸지 않았습니다."),
+    "err_suggest_nodrawing": ("No input drawing in this folder to suggest from.",
+                              "이 폴더에 초안의 근거가 될 입력 도면이 없습니다."),
+    "suggest_btn": ("💡 Suggest answers (draft only)",
+                    "💡 답변 초안 만들기 (초안만, 적용 안 함)"),
+    "suggest_note": ("LLM drafts answers from the drawing + previous Q&A + current results (1 API call, no build, no patch). Edit the draft and press Continue — a draft is never applied on its own.",
+                     "도면 + 기존 Q&A + 현재 결과값으로 LLM이 답변 초안을 만듭니다 (API 1번, 만들기/패치 없음). 초안을 고치고 Continue를 눌러야 적용됩니다. 초안만으로는 아무것도 적용되지 않습니다."),
+    "suggest_title": ("Suggested answers — DRAFT, check before use",
+                      "답변 초안 — 사용 전에 꼭 확인하세요"),
+    "suggest_page_note": ("This is a DRAFT, not your answer. Fix anything wrong, delete any line you do not agree with, then press Continue. Pressing Continue turns the edited draft into your answers for the normal patch path. The draft itself changed nothing.",
+                          "이것은 초안이지 네 답이 아닙니다. 틀린 부분은 고치고, 동의하지 않는 줄은 지운 뒤에 Continue를 누르세요. Continue를 눌러야 고친 초안이 네 답이 되어 일반 패치로 들어갑니다. 초안 자체는 아무것도 바꾸지 않았습니다."),
+    "suggest_continue_btn": ("▶ Continue with this draft (after editing)",
+                              "▶ 이 초안으로 계속 (고친 뒤에)"),
     "preview_none": ("No result previews (render failed — check "
                      ".fcstd / STEP in the file list above).",
                      "결과 프리뷰가 없습니다 (렌더 실패 — .fcstd / STEP 파일 "
@@ -1507,6 +1523,51 @@ def prune_answered_questions(output_dir, require_text_match=True):
         return []
 
 
+def suggest_page(output_dir, answers_text, notes_text, questions_text,
+                 gear_checked, lang="en"):
+    """Suggestion page: editable draft + notes, posting to /answer.
+
+    The draft textarea is the ONLY submitted field (notes and
+    questions are display-only). Posting to /answer runs the
+    normal patch/full-build path with the edited draft as the
+    user's answers — the draft on its own changed nothing.
+    """
+    dir_query = html.escape(str(output_dir), quote=True)
+    result_query = urllib.parse.urlencode({"dir": str(output_dir)})
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Suggested answers — draft</title>
+<style>body{{background:#0b1220;color:#e5e7eb;font-family:sans-serif;
+max-width:900px;margin:40px auto;padding:0 20px}}
+.card{{background:#111827;border:1px solid #374151;border-radius:12px;
+padding:20px;margin:20px 0}}textarea{{width:100%;background:#020617;
+color:#e5e7eb;border:1px solid #374151;border-radius:8px;padding:10px}}
+pre{{white-space:pre-wrap;background:#020617;border:1px solid #374151;
+border-radius:8px;padding:10px}}button{{background:#1d4ed8;color:#fff;
+border:0;border-radius:8px;padding:10px 18px;cursor:pointer}}
+.note{{color:#9ca3af}}a{{color:#93c5fd}}</style></head><body>
+<h2>{tr(lang, 'suggest_title')}</h2>
+<div class="card"><p class="note">{tr(lang, 'suggest_page_note')}</p>
+<form action="/answer" method="post" enctype="multipart/form-data">
+<input type="hidden" name="dir" value="{dir_query}">
+<input type="hidden" name="lang" value="{lang}">
+<label for="answers">{tr(lang, 'answer_label')}</label>
+<textarea id="answers" name="answers" rows="14">{html.escape(answers_text)}</textarea>
+<label for="freecadcmd_answer">freecadcmd</label>
+<input type="text" id="freecadcmd_answer" name="freecadcmd" value="freecadcmd">
+<label><input type="checkbox" name="gear" value="on" {gear_checked} style="width:auto;"> {tr(lang, 'gear_label')}</label>
+<label for="api_key_answer">Meta API key</label>
+<input type="password" id="api_key_answer" name="api_key" autocomplete="off">
+<p class="note">{tr(lang, 'key_note')}</p>
+<button type="submit">{tr(lang, 'suggest_continue_btn')}</button>
+</form></div>
+<div class="card"><h3>Notes (source + confidence, not submitted)</h3>
+<pre>{html.escape(notes_text)}</pre></div>
+<div class="card"><h3>{tr(lang, 'questions_title')}</h3>
+<pre>{html.escape(questions_text)}</pre>
+<p><a href="/result?{result_query}">← Back to result</a></p></div>
+</body></html>"""
+
+
 def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
     # tabbed cards for input images, 3D previews, files/downloads, QA logs.
@@ -1601,6 +1662,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <p class="note">{tr(lang, 'key_note')}</p>
       <button type="submit">{tr(lang, 'continue_button')}</button>
       <p class="note">{tr(lang, 'continue_button_note')}</p>
+      {'<button type="submit" formaction="/suggest" formmethod="post">' + tr(lang, 'suggest_btn') + '</button><p class="note">' + tr(lang, 'suggest_note') + '</p>' if questions_valid else ''}
       </form></div>"""
 
     def view_link(name):
@@ -2202,7 +2264,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest"):
             self.send_error(404, "Not found")
             return
         try:
@@ -2304,6 +2366,75 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_html(400, data)
                 return
             data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/suggest":
+            # Suggest DRAFT answers: one LLM call, no build, no
+            # patch, no file change except suggestion files.
+            # Returns an editable draft page posting to /answer;
+            # the draft on its own changes nothing.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            questions_file = output_dir / "questions.txt"
+            if not questions_file.is_file():
+                data = error_page(tr(lang, "err_suggest_noquestions"), lang=lang)
+                self._send_html(400, data)
+                return
+            drawings = sorted(output_dir.glob("input_drawing.*"))
+            if not drawings:
+                data = error_page(tr(lang, "err_suggest_nodrawing"), lang=lang)
+                self._send_html(400, data)
+                return
+            api_key = fields.get("api_key", "")
+            if not api_key and not dotenv_key_present():
+                data = error_page(tr(lang, "err_key"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--suggest",
+                       "--output-dir", str(output_dir),
+                       "--drawing", str(drawings[0]),
+                       "--freecadcmd", fields.get("freecadcmd", "freecadcmd") or "freecadcmd"]
+            log_path = output_dir / "web_ui_suggest.log"
+            suggest_env = dict(os.environ)
+            suggest_env["PYTHONUTF8"] = "1"
+            if api_key:
+                suggest_env["META_API_KEY"] = api_key
+            else:
+                suggest_env.pop("META_API_KEY", None)
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=suggest_env)
+            answers_file = output_dir / "suggested_answers.txt"
+            notes_file = output_dir / "suggested_notes.txt"
+            if result.returncode != 0 or not answers_file.is_file():
+                data = error_page(tr(lang, "err_suggest_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            answers_text = answers_file.read_text(encoding="utf-8",
+                                                  errors="replace")
+            notes_text = (notes_file.read_text(encoding="utf-8",
+                                               errors="replace")
+                          if notes_file.is_file() else "")
+            questions_text_s = questions_file.read_text(
+                encoding="utf-8", errors="replace")
+            report_text_s = ""
+            report_s = output_dir / "report.txt"
+            if report_s.is_file():
+                report_text_s = report_s.read_text(encoding="utf-8",
+                                                   errors="replace")
+            gear_checked_s = ("checked" if "Gear reference: included"
+                              in report_text_s else "")
+            data = suggest_page(output_dir, answers_text, notes_text,
+                                questions_text_s, gear_checked_s,
+                                lang=lang)
             self._send_html(200, data)
             return
         if parsed.path == "/flip":

@@ -3334,6 +3334,217 @@ def answered_labels_from_qa_history(qa_text, question_dict):
     return set(answers)
 
 
+def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
+                     dry_run):
+    """Suggest DRAFT answers for questions.txt — nothing else.
+
+    Why this exists (Oct 31, 2026 user request): answering every
+    question by hand takes 5+ minutes per round. The LLM already
+    powers the pipeline, so let it draft the answers and let the
+    user edit + confirm them. This mode NEVER builds, patches,
+    or changes the macro, model, questions.txt, or qa_history:
+    it only writes suggested_answers.txt (clean Q lines, in
+    questions order), suggested_notes.txt (source + confidence
+    per question), and suggest_log.txt. The web UI shows the
+    draft in an editable box; only the user's Continue press
+    turns a draft into an answer (via the normal /answer patch
+    path). A draft is therefore never silently applied.
+
+    Sources, in priority order: (1) the drawing image +
+    dimensions.json, (2) qa_history.txt already-decided answers
+    (a draft must NOT contradict them; a conflict is flagged,
+    not silently overridden), (3) current results: macro.py
+    provisional values + feature_history.json, (4) calculation
+    or a standard, only when the first three do not decide,
+    with the calculation shown. The principles file is NOT an
+    answer source: it says how to build, not what this part's
+    dimensions are, so it must not be used to invent a value.
+    If drawing + history + results do not decide a question,
+    the draft answer is "결정 필요: <options>" with confidence
+    결정필요 — never a fake certainty.
+    """
+    log_lines = []
+
+    def _log(msg):
+        log_lines.append(msg)
+        print(msg)
+
+    def _finish(code):
+        (output_dir / "suggest_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return code
+
+    questions_path = output_dir / "questions.txt"
+    if not questions_path.is_file():
+        _log("SUGGEST FAIL: questions.txt missing in this folder. "
+             "Suggest needs pending questions to answer.")
+        return _finish(1)
+    try:
+        question_dict = parse_q_lines(questions_path.read_text(
+            encoding="utf-8", errors="replace"))
+    except OSError:
+        question_dict = {}
+    if not question_dict:
+        _log("SUGGEST FAIL: questions.txt has no valid Q-lines.")
+        return _finish(1)
+    if drawing_path is None:
+        drawings = sorted(output_dir.glob("input_drawing.*"))
+        if not drawings:
+            _log("SUGGEST FAIL: no input_drawing.* in this folder.")
+            return _finish(1)
+        drawing_path = drawings[0]
+    if not drawing_path.is_file():
+        _log(f"SUGGEST FAIL: drawing not found: {drawing_path}")
+        return _finish(1)
+    dims_text = ""
+    dims_path = output_dir / "dimensions.json"
+    if dims_path.is_file():
+        try:
+            _dims = json.loads(dims_path.read_text(encoding="utf-8"))
+            _lines = []
+            for _d in _dims:
+                _val = _d.get("value", "")
+                if _d.get("reference"):
+                    _val = f"({_val})"
+                _lines.append(f"{_d.get('id', 'D?')}: "
+                              f"{_d.get('label', '')} = {_val} mm")
+            dims_text = "\n".join(_lines)
+        except Exception:
+            dims_text = ""
+    qa_text = ""
+    qa_path = output_dir / "qa_history.txt"
+    if qa_path.is_file():
+        try:
+            qa_text = qa_path.read_text(encoding="utf-8",
+                                        errors="replace")[-8000:]
+        except OSError:
+            qa_text = ""
+    hist_text = ""
+    hist_path = output_dir / "feature_history.json"
+    if hist_path.is_file():
+        try:
+            hist = json.loads(hist_path.read_text(encoding="utf-8"))
+            hist_text = feature_history_report(hist.get("features", []))
+        except Exception:
+            hist_text = ""
+    macro_text = ""
+    macro_path = output_dir / "macro.py"
+    if macro_path.is_file():
+        try:
+            macro_text = macro_path.read_text(encoding="utf-8",
+                                              errors="replace")
+        except OSError:
+            macro_text = ""
+    questions_text = questions_path.read_text(encoding="utf-8",
+                                              errors="replace")
+    prompt = (
+        "You are drafting SUGGESTED answers to pending questions "
+        "about a part drawing. You are NOT building anything and "
+        "you are NOT deciding anything: the user will edit and "
+        "confirm your draft before it is used. Answer in Korean.\n\n"
+        "Sources, in priority order: (1) the drawing image and "
+        "the numbered dimensions below, (2) the Q&A history "
+        "below — already-decided answers MUST NOT be contradicted; "
+        "if a new question conflicts with an old answer, flag the "
+        "conflict in Notes instead of silently picking one side, "
+        "(3) the current macro's provisional values and the "
+        "feature history below (what is already built and what "
+        "failed), (4) a calculation or a standard, ONLY when "
+        "(1)-(3) do not decide the question, and then show the "
+        "calculation. The build principles are NOT an answer "
+        "source: never invent a dimension because a principle "
+        "says so.\n\n"
+        "Output EXACTLY two sections, nothing else:\n"
+        "Answers:\n"
+        "Q<n>: <one short answer in Korean, with numbers and units>\n"
+        "(one line per question, every question covered, in the "
+        "same order as the questions)\n"
+        "Notes:\n"
+        "Q<n>: <source: drawing / Q&A history / current result / "
+        "calculation / standard> — <one short sentence> — "
+        "확신: 확실 / 계산 / 추측 / 결정필요\n"
+        "If drawing + history + results do not decide a question, "
+        "its answer MUST be '결정 필요: <options>' and its "
+        "confidence 결정필요. Never present a guess as certain.\n\n"
+        f"Pending questions:\n{questions_text}\n\n"
+        + (f"Numbered dimensions:\n{dims_text}\n\n" if dims_text else "")
+        + (f"Q&A history (already decided):\n{qa_text}\n\n"
+           if qa_text.strip() else "")
+        + (f"Feature history (pipeline-measured):\n{hist_text}\n\n"
+           if hist_text else "")
+        + (f"Current macro.py (provisional values live here):\n"
+           f"```python\n{macro_text}\n```\n" if macro_text else "")
+    )
+    (output_dir / "suggest_prompt.txt").write_text(prompt,
+                                                   encoding="utf-8")
+    if dry_run:
+        _log("SUGGEST DRY-RUN: prompt written to suggest_prompt.txt, "
+             "no API call, no suggestion written")
+        return _finish(0)
+    api_key = os.environ.get("META_API_KEY") or load_dotenv_key()
+    if not api_key:
+        _log("SUGGEST FAIL: META_API_KEY is not set (password field "
+             "or local .env)")
+        return _finish(1)
+    mime_type, _enc = mimetypes.guess_type(str(drawing_path))
+    if mime_type is None:
+        mime_type = "application/octet-stream"
+    try:
+        image_b64 = base64.b64encode(
+            drawing_path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        _log(f"SUGGEST FAIL: cannot read drawing: {exc}")
+        return _finish(1)
+    try:
+        response_json = call_api(
+            api_key, model, max_tokens,
+            build_messages(prompt, image_b64, mime_type))
+        content = extract_content(response_json)
+    except RuntimeError as exc:
+        _log(f"SUGGEST FAIL: API error: {exc}")
+        return _finish(1)
+    (output_dir / "suggest_raw_response.txt").write_text(
+        json.dumps(response_json, indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    # Split Answers: / Notes: sections; only the Answers section
+    # becomes suggested_answers.txt (clean Q lines for /answer).
+    sections = {}
+    current = None
+    for line in (content or "").splitlines():
+        stripped = line.strip()
+        if stripped == "Answers:":
+            current = "answers"
+            sections[current] = []
+            continue
+        if stripped == "Notes:":
+            current = "notes"
+            sections[current] = []
+            continue
+        if current:
+            sections[current].append(line)
+    answers = parse_q_lines("\n".join(sections.get("answers", [])))
+    missing = [label for label in question_dict
+               if label not in answers]
+    pasted = [label for label, ans in answers.items()
+              if ans == question_dict.get(label)]
+    if missing or pasted:
+        _log(f"SUGGEST FAIL: draft incomplete (missing: {missing}; "
+             f"question-as-answer: {pasted}). Nothing written; "
+             "answer manually or retry.")
+        return _finish(1)
+    ordered = [f"{label}: {answers[label]}"
+               for label in question_dict if label in answers]
+    (output_dir / "suggested_answers.txt").write_text(
+        "\n".join(ordered) + "\n", encoding="utf-8")
+    (output_dir / "suggested_notes.txt").write_text(
+        "\n".join(sections.get("notes", [])).strip() + "\n",
+        encoding="utf-8")
+    _log(f"SUGGEST OK: draft for {len(ordered)} question(s) written "
+         f"to suggested_answers.txt + suggested_notes.txt. "
+         f"Draft only — nothing built, nothing applied.")
+    return _finish(0)
+
+
 def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                    dry_run):
     """Patch the existing macro.py in place — no regeneration.
@@ -3727,6 +3938,18 @@ def parse_args(argv=None):
                         "rendered with the XYZ triad. No API call, "
                         "no model/macro/report change. Needs only "
                         "--output-dir (+ --freecadcmd).")
+    parser.add_argument("--suggest", action="store_true",
+                        help="Suggest DRAFT answers for an existing "
+                        "folder's questions.txt (web \"Suggest "
+                        "answers\" button): one LLM call with the "
+                        "drawing + dimensions + Q&A history + "
+                        "current results, writing only "
+                        "suggested_answers.txt + suggested_notes.txt. "
+                        "No macro, model, questions.txt, or "
+                        "qa_history change; a draft is never "
+                        "applied until the user edits + confirms it "
+                        "via /answer. With --dry-run it writes "
+                        "suggest_prompt.txt and calls no API.")
     parser.add_argument("--patch", action="store_true",
                         help="Patch an existing result folder's macro.py "
                         "in place instead of regenerating it: one "
@@ -3766,13 +3989,17 @@ def main(argv=None):
     if args.remap:
         return run_remap_mode(output_dir, args.freecadcmd, args.model,
                               args.max_tokens, args.dry_run)
+    if args.suggest:
+        _drawing = Path(args.drawing) if args.drawing else None
+        return run_suggest_mode(output_dir, _drawing, args.model,
+                                args.max_tokens, args.dry_run)
     if args.patch:
         return run_patch_mode(output_dir, args.freecadcmd, args.model,
                               args.max_tokens, args.text, args.dry_run)
     if args.images:
         return run_images_mode(output_dir, args.freecadcmd)
     if not args.drawing:
-        die("--drawing is required unless --measure, --inspect, --remap, --patch, or --images is given.")
+        die("--drawing is required unless --measure, --inspect, --remap, --patch, --images, or --suggest is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():
