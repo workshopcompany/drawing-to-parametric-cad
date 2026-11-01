@@ -472,14 +472,12 @@ S = {
                               "이 폴더에 초안의 근거가 될 입력 도면이 없습니다."),
     "suggest_btn": ("💡 Suggest answers (draft only)",
                     "💡 답변 초안 만들기 (초안만, 적용 안 함)"),
-    "suggest_note": ("LLM drafts answers from the drawing + previous Q&A + current results (1 API call, no build, no patch). Edit the draft and press Continue — a draft is never applied on its own.",
-                     "도면 + 기존 Q&A + 현재 결과값으로 LLM이 답변 초안을 만듭니다 (API 1번, 만들기/패치 없음). 초안을 고치고 Continue를 눌러야 적용됩니다. 초안만으로는 아무것도 적용되지 않습니다."),
-    "suggest_title": ("Suggested answers — DRAFT, check before use",
-                      "답변 초안 — 사용 전에 꼭 확인하세요"),
-    "suggest_page_note": ("This is a DRAFT, not your answer. Fix anything wrong, delete any line you do not agree with, then press Continue. Pressing Continue turns the edited draft into your answers for the normal patch path. The draft itself changed nothing.",
-                          "이것은 초안이지 네 답이 아닙니다. 틀린 부분은 고치고, 동의하지 않는 줄은 지운 뒤에 Continue를 누르세요. Continue를 눌러야 고친 초안이 네 답이 되어 일반 패치로 들어갑니다. 초안 자체는 아무것도 바꾸지 않았습니다."),
-    "suggest_continue_btn": ("▶ Continue with this draft (after editing)",
-                              "▶ 이 초안으로 계속 (고친 뒤에)"),
+    "suggest_note": ("LLM drafts answers from the drawing + previous Q&A + current results (1 API call, no build, no patch). The draft is filled into the answer box on this result page — nothing is submitted until you press Continue work.",
+                     "도면 + 기존 Q&A + 현재 결과값으로 LLM이 답변 초안을 만듭니다 (API 1번, 만들기/패치 없음). 초안은 이 결과 페이지의 답변란에 채워질 뿐, Continue work를 누르기 전에는 아무것도 제출되지 않습니다."),
+    "suggest_filled": ("Draft filled into the answer box below. Nothing has been submitted yet — edit the draft, then press Continue work to submit it.",
+                       "초안이 아래 답변란에 채워졌습니다. 아직 제출된 게 아닙니다 — 초안을 고친 뒤 Continue work를 눌러야 제출됩니다."),
+    "suggest_notes_title": ("Draft notes (source + confidence, not submitted)",
+                             "초안 참고 노트 (출처 + 확신도, 제출되지 않음)"),
     "preview_none": ("No result previews (render failed — check "
                      ".fcstd / STEP in the file list above).",
                      "결과 프리뷰가 없습니다 (렌더 실패 — .fcstd / STEP 파일 "
@@ -1573,61 +1571,16 @@ def prune_answered_questions(output_dir, require_text_match=True):
         return []
 
 
-def suggest_page(output_dir, answers_text, notes_text, questions_text,
-                 gear_checked, lang="en"):
-    """Suggestion page: editable draft + notes, posting to /answer.
-
-    The draft textarea is the ONLY submitted field (notes and
-    questions are display-only). Posting to /answer runs the
-    normal patch/full-build path with the edited draft as the
-    user's answers — the draft on its own changed nothing.
-    """
-    dir_query = html.escape(str(output_dir), quote=True)
-    result_query = urllib.parse.urlencode({"dir": str(output_dir)})
-    # NOTE (Nov 1, 2026 blank-/suggest bug): every other page goes
-    # through page(), which returns bytes, but this function used
-    # to return a plain str. _send_html then sent a character
-    # count as Content-Length and crashed on wfile.write(str),
-    # so the browser got headers promising N bytes and 0 bytes
-    # of body — a blank dark page at /suggest. Encode here, like
-    # page() does, so the length is a byte count.
-    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Suggested answers — draft</title>
-<style>body{{background:#0b1220;color:#e5e7eb;font-family:sans-serif;
-max-width:900px;margin:40px auto;padding:0 20px}}
-.card{{background:#111827;border:1px solid #374151;border-radius:12px;
-padding:20px;margin:20px 0}}textarea{{width:100%;background:#020617;
-color:#e5e7eb;border:1px solid #374151;border-radius:8px;padding:10px}}
-pre{{white-space:pre-wrap;background:#020617;border:1px solid #374151;
-border-radius:8px;padding:10px}}button{{background:#1d4ed8;color:#fff;
-border:0;border-radius:8px;padding:10px 18px;cursor:pointer}}
-.note{{color:#9ca3af}}a{{color:#93c5fd}}</style></head><body>
-<h2>{tr(lang, 'suggest_title')}</h2>
-<div class="card"><p class="note">{tr(lang, 'suggest_page_note')}</p>
-<form action="/answer" method="post" enctype="multipart/form-data">
-<input type="hidden" name="dir" value="{dir_query}">
-<input type="hidden" name="lang" value="{lang}">
-<label for="answers">{tr(lang, 'answer_label')}</label>
-<textarea id="answers" name="answers" rows="14">{html.escape(answers_text)}</textarea>
-<label for="freecadcmd_answer">freecadcmd</label>
-<input type="text" id="freecadcmd_answer" name="freecadcmd" value="freecadcmd">
-<label><input type="checkbox" name="gear" value="on" {gear_checked} style="width:auto;"> {tr(lang, 'gear_label')}</label>
-<label for="api_key_answer">Meta API key</label>
-<input type="password" id="api_key_answer" name="api_key" autocomplete="off">
-<p class="note">{tr(lang, 'key_note')}</p>
-<button type="submit">{tr(lang, 'suggest_continue_btn')}</button>
-</form></div>
-<div class="card"><h3>Notes (source + confidence, not submitted)</h3>
-<pre>{html.escape(notes_text)}</pre></div>
-<div class="card"><h3>{tr(lang, 'questions_title')}</h3>
-<pre>{html.escape(questions_text)}</pre>
-<p><a href="/result?{result_query}">← Back to result</a></p></div>
-</body></html>""".encode("utf-8")
-
-
-def result_page(output_dir, returncode, stdout_tail="", lang="en"):
+def result_page(output_dir, returncode, stdout_tail="", lang="en",
+                draft_answers=None, draft_notes=None):
     # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
     # tabbed cards for input images, 3D previews, files/downloads, QA logs.
+    # Nov 1, 2026 (user: a separate draft page was confusing — was
+    # it submitted or just drafted?): /suggest no longer navigates
+    # away. It returns THIS page with draft_answers filled into the
+    # answer box and the Q&A tab open, so the only submit button
+    # is the familiar Continue work button. Nothing is submitted
+    # until that button is pressed.
     if returncode == 0:
         banner = f"<span class=\"status-ok\">{tr(lang, 'success')}</span>"
     else:
@@ -1686,7 +1639,26 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     for label in labels:
         if label not in seen:
             seen.append(label)
-    prefill = "\n".join(f"{label}: " for label in seen)
+    # A draft (from /suggest) replaces the empty "Q1: " prefill:
+    # the user edits the draft IN this box and submits it with
+    # Continue work. No draft -> the old empty-label prefill.
+    prefill = (draft_answers if draft_answers else
+               "\n".join(f"{label}: " for label in seen))
+    draft_rows = 14 if draft_answers else 10
+    draft_notice = ""
+    if draft_answers:
+        _notes_block = ""
+        if draft_notes:
+            _notes_block = (
+                f"<h3>{tr(lang, 'suggest_notes_title')}</h3>"
+                f"<pre>{html.escape(draft_notes)}</pre>")
+        draft_notice = (
+            f"<div class=\"card\"><h3>💡 {tr(lang, 'suggest_btn')}</h3>"
+            f"<p>{tr(lang, 'suggest_filled')}</p>{_notes_block}</div>")
+    # With a draft, open the Q&A tab (where the answer box lives)
+    # instead of the default drawing tab, so the filled box is
+    # what the user sees first.
+    _active_tab = "r4" if draft_answers else "r1"
     gear_checked = ("checked" if "Gear reference: included"
                     in report_text else "")
     dir_query = html.escape(str(output_dir), quote=True)
@@ -1709,7 +1681,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <input type="hidden" name="dir" value="{dir_query}">
       <input type="hidden" name="lang" value="{lang}">
       <label for="answers">{_form_label}</label>
-      <textarea id="answers" name="answers" rows="10">{html.escape(prefill)}</textarea>
+      <textarea id="answers" name="answers" rows="{draft_rows}">{html.escape(prefill)}</textarea>
       <label for="freecadcmd_answer">freecadcmd</label>
       <input type="text" id="freecadcmd_answer" name="freecadcmd" value="freecadcmd">
       <label><input type="checkbox" name="gear" value="on" {gear_checked} style="width:auto;"> {tr(lang, 'gear_label')}</label>
@@ -2136,28 +2108,28 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
     <p>{banner}</p>
     <p>{pills}</p>
     <div class="tabs">
-      <button type="button" class="tab-btn active" data-tab="r1">&#128008; {tr(lang, 'tab_drawing')}</button>
-      <button type="button" class="tab-btn" data-tab="r2">&#129521; {tr(lang, 'tab_params')}</button>
-      <button type="button" class="tab-btn" data-tab="r3">&#128295; {tr(lang, 'tab_export')}</button>
-      <button type="button" class="tab-btn" data-tab="r4">&#128269; {tr(lang, 'tab_qa')}</button>
-      <button type="button" class="tab-btn" data-tab="r5">&#10003; {tr(lang, 'tab_matching')}</button>
+      <button type="button" class="tab-btn{' active' if _active_tab == 'r1' else ''}" data-tab="r1">&#128008; {tr(lang, 'tab_drawing')}</button>
+      <button type="button" class="tab-btn{' active' if _active_tab == 'r2' else ''}" data-tab="r2">&#129521; {tr(lang, 'tab_params')}</button>
+      <button type="button" class="tab-btn{' active' if _active_tab == 'r3' else ''}" data-tab="r3">&#128295; {tr(lang, 'tab_export')}</button>
+      <button type="button" class="tab-btn{' active' if _active_tab == 'r4' else ''}" data-tab="r4">&#128269; {tr(lang, 'tab_qa')}</button>
+      <button type="button" class="tab-btn{' active' if _active_tab == 'r5' else ''}" data-tab="r5">&#10003; {tr(lang, 'tab_matching')}</button>
     </div>
-    <div class="tab-panel active" id="r1">
+    <div class="tab-panel{' active' if _active_tab == 'r1' else ''}" id="r1">
       <div class="card"><h3>🖼 {tr(lang, 'input_title')}</h3>
       <p class="note">{tr(lang, 'input_note')}</p></div>
       <div class="grid2">{t1_cards}</div>
     </div>
-    <div class="tab-panel" id="r2">
+    <div class="tab-panel{' active' if _active_tab == 'r2' else ''}" id="r2">
       {t2_viewer}
       <div class="grid2">{t2_cards}</div>
       <div class="card"><h3>🖼 {tr(lang, 'images_btn')}</h3>{images_block}</div>
       {tree_card}
     </div>
-    <div class="tab-panel" id="r3">
+    <div class="tab-panel{' active' if _active_tab == 'r3' else ''}" id="r3">
       <div class="card"><h3>🔧 {tr(lang, 'files_title')}</h3>
       <table class="files"><tr><th>{tr(lang, 'th_file')}</th><th>{tr(lang, 'th_bytes')}</th><th>{tr(lang, 'th_link')}</th></tr>{file_rows}</table></div>
     </div>
-    <div class="tab-panel" id="r5">
+    <div class="tab-panel{' active' if _active_tab == 'r5' else ''}" id="r5">
       {numbered_img}
       <div class="card"><h3>&#10003; {tr(lang, 'matching_title')}</h3>
       <p class="note">{tr(lang, 'matching_note')}</p>
@@ -2171,8 +2143,9 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <p class="note">{tr(lang, 'matching_legend')}</p>
       <p class="note">{tr(lang, 'matching_disclaimer')}</p></div>
     </div>
-    <div class="tab-panel" id="r4">
+    <div class="tab-panel{' active' if _active_tab == 'r4' else ''}" id="r4">
       <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_display) if questions_display else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
+      {draft_notice}
       {answer_form}
       <div class="grid2">
         <div class="card"><h3>{tr(lang, 'report_title')}</h3><pre>{html.escape(report_text) if report_text else tr(lang, 'report_none')}</pre></div>
@@ -2551,8 +2524,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/suggest":
             # Suggest DRAFT answers: one LLM call, no build, no
             # patch, no file change except suggestion files.
-            # Returns an editable draft page posting to /answer;
-            # the draft on its own changes nothing.
+            # Nov 1, 2026 (user: a separate draft page was
+            # confusing — submitted or just drafted?): returns
+            # the RESULT page with the draft filled into its
+            # answer box and the Q&A tab open. Nothing is
+            # submitted until the user presses Continue work.
             raw_dir = fields.get("dir", "")
             try:
                 output_dir = Path(raw_dir).resolve()
@@ -2603,18 +2579,9 @@ class Handler(BaseHTTPRequestHandler):
             notes_text = (notes_file.read_text(encoding="utf-8",
                                                errors="replace")
                           if notes_file.is_file() else "")
-            questions_text_s = questions_file.read_text(
-                encoding="utf-8", errors="replace")
-            report_text_s = ""
-            report_s = output_dir / "report.txt"
-            if report_s.is_file():
-                report_text_s = report_s.read_text(encoding="utf-8",
-                                                   errors="replace")
-            gear_checked_s = ("checked" if "Gear reference: included"
-                              in report_text_s else "")
-            data = suggest_page(output_dir, answers_text, notes_text,
-                                questions_text_s, gear_checked_s,
-                                lang=lang)
+            data = result_page(output_dir, 0, lang=lang,
+                               draft_answers=answers_text,
+                               draft_notes=notes_text)
             self._send_html(200, data)
             return
         if parsed.path == "/flip":
@@ -3177,7 +3144,7 @@ class Handler(BaseHTTPRequestHandler):
         # str page must never reach wfile.write (TypeError, 0
         # bytes after a Content-Length header). Encode here so
         # the length is always a byte count, even if a future
-        # page function forgets to encode like suggest_page did.
+        # page function forgets to encode.
         if isinstance(data, str):
             data = data.encode("utf-8")
         self.send_response(status)
