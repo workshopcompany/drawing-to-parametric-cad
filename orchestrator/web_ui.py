@@ -1613,6 +1613,23 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
     questions_display = (questions_text if questions_valid
                          else (tr(lang, 'questions_invalid_note')
                                if questions_text.strip() else ""))
+    # Outline proposal card (Nov 1, 2026 user rule): when an
+    # ask-first run proposed how to use the attached outline,
+    # show that proposal next to the questions, so the user
+    # sees the program's proposal before answering Q0.
+    proposal_card = ""
+    _proposal_file = output_dir / "outline_proposal.txt"
+    if _proposal_file.is_file():
+        try:
+            _proposal_text = _proposal_file.read_text(
+                encoding="utf-8", errors="replace").strip()
+        except OSError:
+            _proposal_text = ""
+        if _proposal_text:
+            proposal_card = (
+                f"<div class=\"card\"><h3>💡 Outline proposal "
+                f"(from the program — confirm with Q0)</h3>"
+                f"<p>{html.escape(_proposal_text)}</p></div>")
     if questions_valid:
         banner = (f"<span class=\"status-warn\">{tr(lang, 'questions_pending')}</span>")
     elif questions_text.strip():
@@ -1684,6 +1701,8 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       <textarea id="answers" name="answers" rows="{draft_rows}">{html.escape(prefill)}</textarea>
       <label for="freecadcmd_answer">freecadcmd</label>
       <input type="text" id="freecadcmd_answer" name="freecadcmd" value="freecadcmd">
+      <label for="outline_width_answer">Outline real width (mm, image outline only — traces the outline to mm points on patch/continue when no traced points exist yet)</label>
+      <input type="text" id="outline_width_answer" name="outline_width_mm" placeholder="e.g. 4.8">
       <label><input type="checkbox" name="gear" value="on" {gear_checked} style="width:auto;"> {tr(lang, 'gear_label')}</label>
       <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> {tr(lang, 'dry_label')}</label>
       <label for="api_key_answer">Meta API key</label>
@@ -2145,6 +2164,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
     </div>
     <div class="tab-panel{' active' if _active_tab == 'r4' else ''}" id="r4">
       <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_display) if questions_display else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
+      {proposal_card}
       {draft_notice}
       {answer_form}
       <div class="grid2">
@@ -3051,6 +3071,13 @@ class Handler(BaseHTTPRequestHandler):
             ]
             if patch_text:
                 command += ["--text", patch_text]
+            _ow_patch = (fields.get("outline_width_mm", "") or "").strip()
+            if _ow_patch:
+                try:
+                    float(_ow_patch)
+                    command += ["--outline-width-mm", _ow_patch]
+                except ValueError:
+                    pass
             if dry_run:
                 command.append("--dry-run")
         else:

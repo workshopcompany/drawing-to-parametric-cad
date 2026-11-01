@@ -144,6 +144,15 @@ Terminology: use "empty hole" for a hole, never "void".
 - A tolerance value may still appear in a matching table as a reference (NOTE) row, but
   it never changes a sketch/feature value.
 
+### A traced outline decides its feature's shape (Nov 1, 2026 user rule)
+
+- When traced outline points are in the prompt, they ARE the outline feature's shape.
+  Copy them exactly for that feature's sketch — do not hand-sketch a rectangle or an
+  approximation, and do not ask separate questions about that feature's curve, overall
+  size, notch/slot positions or directions, or low points. Those are already answered
+  by the traced points; only what the outline cannot show (extrusion thickness, a
+  base/lower section shape, a feature not visible in the outline) is still a question.
+
 ## 8. Stack / order
 
 - Segments follow axis order, start = previous segment end, sum = total length.

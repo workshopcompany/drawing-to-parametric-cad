@@ -149,6 +149,97 @@ ASK_FIRST_INSTRUCTION = (
     "value, for example D2: lower reference = (1.97) mm @ (0.20, 0.80)."
 )
 
+
+def outline_proposal_instruction(has_points):
+    """Ask-first outline instruction (Nov 1, 2026 user rule).
+
+    When the user attaches an outline, the program must ASK
+    whether to reflect it and PROPOSE how — instead of asking
+    a dozen separate shape questions the outline already
+    answers. The ask-first response therefore starts with an
+    OUTLINE PROPOSAL section and a single confirmation
+    question Q0; only questions the outline CANNOT decide
+    become Q1+. If the outline has numeric traced points,
+    they are the proposal's evidence. If it is image-only,
+    Q0 must also ask for the outline's real width in mm —
+    without a scale, pixels must never be presented as mm,
+    so no numeric tracing is possible until the width is
+    given.
+    """
+    if has_points:
+        scale_note = (
+            "The traced outline points are in this prompt "
+            "(TRACED OUTLINE section). Base the proposal on "
+            "those numbers: overall width/height, top-open "
+            "notches/slots and their widths and directions, "
+            "and the lowest points on each side. Do NOT ask "
+            "for a width — the trace already carries the scale.")
+    else:
+        scale_note = (
+            "No numeric traced points are in this prompt yet "
+            "(outline image only, no scale given). The "
+            "proposal must say so plainly, and Q0 must ask "
+            "for the outline's real width in mm in addition "
+            "to the confirmation — that width is what lets "
+            "the program trace the outline to mm numbers. "
+            "Do NOT present pixel distances as mm.")
+    return (
+        "OUTLINE RULE — read before listing questions: the user "
+        "attached an outline for this part, so FIRST propose "
+        "how it will be used, then ask ONE confirmation "
+        "question about it. Output, before the question list:\n"
+        "OUTLINE PROPOSAL:\n"
+        "<one paragraph: which feature/profile the outline "
+        "defines; which shape decisions it settles — profile "
+        "curve, overall outline size, notch/slot positions "
+        "and directions, lowest points on each side; and what "
+        "it does NOT decide — extrusion thickness, base/lower "
+        "section shape, and any feature not visible in the "
+        "outline>\n"
+        "Then, as the FIRST question line:\n"
+        "Q0: <one single line, max 500 chars: 'Use the "
+        "outline as the <feature/profile> (traced points "
+        "copied exactly for that feature)? Confirm, or "
+        "correct the mapping: which feature, which datum/"
+        "origin, and which scale' — plus, when no traced "
+        "points exist, 'and give the outline real width in "
+        "mm'>\n"
+        "After Q0, list ONLY questions the outline cannot "
+        "decide, numbered Q1, Q2, ... Do NOT ask separate "
+        "questions about anything the outline already shows: "
+        "not its curve/shape, not its overall size, not "
+        "notch/slot positions or directions, not hook low "
+        "points, not radii of the outline curve itself. If "
+        "Q0 is confirmed, those items are Confirmed by the "
+        "outline, not open questions. " + scale_note
+    )
+
+
+def extract_outline_proposal(content):
+    """Return the OUTLINE PROPOSAL paragraph from an ask-first
+    response, or '' when the response has none. Lines from
+    'OUTLINE PROPOSAL:' up to (not including) the first
+    Q-line are the proposal; the web UI saves it to
+    outline_proposal.txt so the user sees the proposal next
+    to the questions."""
+    lines = []
+    in_proposal = False
+    for line in (content or "").splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("OUTLINE PROPOSAL"):
+            in_proposal = True
+            rest = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+            if rest:
+                lines.append(rest)
+            continue
+        if in_proposal:
+            if re.match(r"(?:Q|Question)\s*\d+\s*[:.\-\)]", stripped):
+                break
+            if stripped:
+                lines.append(stripped)
+    return " ".join(lines).strip()
+
+
 # Safety: patterns rejected in a generated macro. The orchestrator itself
 # may use the standard library; this list applies ONLY to macro text.
 # Lesson from the Oct 29 home run (attempts 1-2 blocked before running):
@@ -4003,6 +4094,31 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
             macro_text = ""
     questions_text = questions_path.read_text(encoding="utf-8",
                                               errors="replace")
+    # Traced outline (Nov 1, 2026 user rule): suggest must
+    # infer profile answers from the outline instead of
+    # returning Needs decision for every shape question. The
+    # points are numeric evidence in the prompt; the outline
+    # image, when present, is sent as a second image below.
+    outline_points_text = ""
+    _pts_path = output_dir / "outline_points.json"
+    if _pts_path.is_file():
+        try:
+            outline_points_text = format_outline_points_text(
+                json.loads(_pts_path.read_text(encoding="utf-8")))
+        except Exception:
+            outline_points_text = ""
+    outline_image_suggest = None
+    for _cand in sorted(output_dir.glob("input_outline.*")):
+        if _cand.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                    ".webp", ".bmp", ".gif"):
+            try:
+                _mime, _ = mimetypes.guess_type(str(_cand))
+                outline_image_suggest = (
+                    base64.b64encode(_cand.read_bytes()).decode("ascii"),
+                    _mime or "image/png")
+            except OSError:
+                outline_image_suggest = None
+            break
     prompt = (
         "You are drafting SUGGESTED answers to pending questions "
         "about a part drawing. You are NOT building anything and "
@@ -4018,6 +4134,19 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
         "ignoring the tolerance and modelling the nominal "
         "dimension, stating the nominal value — never ask the "
         "user which limit to use.\n\n"
+        "Outline rule (Nov 1, 2026 user rule): the program must "
+        "infer from the outline instead of asking the user. If "
+        "traced outline points are given below, any pending "
+        "question about the outline feature's shape — its "
+        "curve, overall size, notch/slot positions and "
+        "directions, or lowest points on each side — MUST be "
+        "answered FROM those points, with the numbers, not "
+        "'Needs decision'. Only questions the outline cannot "
+        "decide (extrusion thickness, a base/lower section "
+        "shape, a feature not visible in the outline) may be "
+        "'Needs decision'. When no traced points are given, "
+        "say so in Notes for outline-shape questions instead "
+        "of inventing coordinates.\n\n"
         "Sources, in priority order: (1) the drawing image and "
         "the numbered dimensions below, (2) the Q&A history "
         "below — already-decided answers MUST NOT be contradicted; "
@@ -4043,6 +4172,9 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
         "its answer MUST be 'Needs decision: <options>' and its "
         "confidence needs-decision. Never present a guess as certain.\n\n"
         f"Pending questions:\n{questions_text}\n\n"
+        + (f"Traced outline points (answer outline-shape "
+           f"questions FROM these numbers):\n"
+           f"{outline_points_text}\n\n" if outline_points_text else "")
         + (f"Numbered dimensions:\n{dims_text}\n\n" if dims_text else "")
         + (f"Q&A history (already decided):\n{qa_text}\n\n"
            if qa_text.strip() else "")
@@ -4074,7 +4206,8 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
     try:
         response_json = call_api(
             api_key, model, max_tokens,
-            build_messages(prompt, image_b64, mime_type))
+            build_messages(prompt, image_b64, mime_type,
+                           outline_image=outline_image_suggest))
         content = extract_content(response_json)
     except RuntimeError as exc:
         _log(f"SUGGEST FAIL: API error: {exc}")
@@ -4122,7 +4255,7 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
 
 
 def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
-                   dry_run):
+                   dry_run, outline_width_mm=None):
     """Patch the existing macro.py in place — no regeneration.
 
     Why this mode exists (Oct 31, 2026 user instruction): a
@@ -4166,6 +4299,35 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
         _log("PATCH FAIL: no modification instructions given.")
         return _finish(1)
     macro_text = macro_path.read_text(encoding="utf-8", errors="replace")
+    # Outline trace on patch (Nov 1, 2026 user rule): a patch
+    # prompt carries traced points only when outline_points.json
+    # exists. If the folder has an outline image but no points
+    # yet, and a width in mm was given with this answer, trace
+    # NOW (best-effort: a trace failure never fails the patch,
+    # it just leaves the previous text-only behaviour + a log
+    # line). Without this, a Q0 confirmation that supplies the
+    # width would still patch blind.
+    if outline_width_mm is not None and not (output_dir / "outline_points.json").is_file():
+        for _cand in sorted(output_dir.glob("input_outline.*")) + \
+                sorted(output_dir.glob("outline_input.*")):
+            if _cand.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                        ".webp", ".bmp", ".gif"):
+                try:
+                    if run_trace_outline_mode(
+                            output_dir, freecadcmd, _cand,
+                            outline_width_mm) == 0:
+                        _log("PATCH: outline traced from "
+                             f"{_cand.name} (width "
+                             f"{outline_width_mm} mm) -> "
+                             "outline_points.json")
+                    else:
+                        _log("PATCH: outline trace failed (see "
+                             "trace_log.txt); continuing without "
+                             "traced points.")
+                except Exception as exc:
+                    _log(f"PATCH: outline trace skipped ({exc}); "
+                         "continuing without traced points.")
+                break
     qa_text = ""
     qa_path = output_dir / "qa_history.txt"
     if qa_path.is_file():
@@ -4662,7 +4824,8 @@ def main(argv=None):
                                 args.max_tokens, args.dry_run)
     if args.patch:
         return run_patch_mode(output_dir, args.freecadcmd, args.model,
-                              args.max_tokens, args.text, args.dry_run)
+                              args.max_tokens, args.text, args.dry_run,
+                              outline_width_mm=args.outline_width_mm)
     if args.images:
         return run_images_mode(output_dir, args.freecadcmd)
     if not args.drawing:
@@ -4790,6 +4953,12 @@ def main(argv=None):
         # run, with the answers as --text.
         base_prompt = build_ask_prompt(principles_text, args.text,
                                        outline_text)
+        if args.outline:
+            # Nov 1, 2026 user rule: an attached outline must
+            # be proposed + confirmed (Q0), not silently
+            # eyeballed while 18 shape questions are asked.
+            base_prompt += ("\n\n" + outline_proposal_instruction(
+                outline_points_data is not None))
         report_lines.append("Mode: ASK-FIRST - questions only, no model yet.")
     report_lines.append(f"Drawing: {drawing_path}")
     report_lines.append(f"Principles: {args.principles}")
@@ -4847,6 +5016,25 @@ def main(argv=None):
             write_report(output_dir / "report.txt", report_lines)
             print("\n".join(report_lines))
             return 1
+        # Outline proposal (Nov 1, 2026 user rule): the
+        # proposal paragraph is saved where the result page
+        # shows it next to the questions, so the user sees
+        # WHAT the program proposes to do with the outline
+        # before answering Q0. A run with no proposal must
+        # not leave a stale proposal from an earlier run.
+        _proposal_path = output_dir / "outline_proposal.txt"
+        _proposal = extract_outline_proposal(content)
+        try:
+            if _proposal:
+                _proposal_path.write_text(_proposal + "\n",
+                                          encoding="utf-8")
+                report_lines.append(
+                    "Outline proposal: see outline_proposal.txt "
+                    "(confirm with Q0).")
+            elif _proposal_path.is_file():
+                _proposal_path.unlink()
+        except OSError:
+            pass
         questions = extract_questions(content, "")
         # Numbered dimensions: D1... with approximate positions,
         # saved for the web UI matching tab (numbered drawing +
