@@ -3835,11 +3835,16 @@ def run_trace_outline_mode(output_dir, freecadcmd, image_path,
     env["TRACE_OVERLAY"] = str(overlay_path)
     if width_mm is not None:
         env["TRACE_WIDTH_MM"] = str(width_mm)
-    with open(output_dir / "trace_run.log", "w",
-              encoding="utf-8") as log_file:
-        subprocess.run([freecadcmd, str(script)],
-                       stdout=log_file, stderr=subprocess.STDOUT,
-                       env=env)
+    try:
+        with open(output_dir / "trace_run.log", "w",
+                  encoding="utf-8") as log_file:
+            subprocess.run([freecadcmd, str(script)],
+                           stdout=log_file, stderr=subprocess.STDOUT,
+                           env=env)
+    except Exception as exc:
+        _log(f"TRACE FAIL: could not run trace_outline.py "
+             f"(freecadcmd?) : {exc}")
+        return _finish(1)
     if not traced_path.is_file():
         _log("TRACE FAIL: trace_outline.py wrote no output "
              "(see trace_run.log)")
@@ -4283,8 +4288,11 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                     base64.b64encode(_cand.read_bytes()).decode("ascii"),
                     _mime or "image/png")
                 _log(f"PATCH: outline image resent from {_cand.name}")
-            except OSError:
-                pass
+            except Exception as exc:
+                # A broken outline file must never crash a patch:
+                # fall back to text-only and say so plainly.
+                _log(f"PATCH: outline image unreadable ({exc}); "
+                     "continuing text-only.")
             break
     if dry_run:
         _log("PATCH DRY-RUN: prompt written to patch_prompt.txt, "
