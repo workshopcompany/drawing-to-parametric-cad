@@ -1584,6 +1584,13 @@ def suggest_page(output_dir, answers_text, notes_text, questions_text,
     """
     dir_query = html.escape(str(output_dir), quote=True)
     result_query = urllib.parse.urlencode({"dir": str(output_dir)})
+    # NOTE (Nov 1, 2026 blank-/suggest bug): every other page goes
+    # through page(), which returns bytes, but this function used
+    # to return a plain str. _send_html then sent a character
+    # count as Content-Length and crashed on wfile.write(str),
+    # so the browser got headers promising N bytes and 0 bytes
+    # of body — a blank dark page at /suggest. Encode here, like
+    # page() does, so the length is a byte count.
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Suggested answers — draft</title>
 <style>body{{background:#0b1220;color:#e5e7eb;font-family:sans-serif;
@@ -1615,7 +1622,7 @@ border:0;border-radius:8px;padding:10px 18px;cursor:pointer}}
 <div class="card"><h3>{tr(lang, 'questions_title')}</h3>
 <pre>{html.escape(questions_text)}</pre>
 <p><a href="/result?{result_query}">← Back to result</a></p></div>
-</body></html>"""
+</body></html>""".encode("utf-8")
 
 
 def result_page(output_dir, returncode, stdout_tail="", lang="en"):
@@ -3166,6 +3173,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send_html(200, data)
 
     def _send_html(self, status, data):
+        # Belt and braces for the Nov 1, 2026 blank-page bug: a
+        # str page must never reach wfile.write (TypeError, 0
+        # bytes after a Content-Length header). Encode here so
+        # the length is always a byte count, even if a future
+        # page function forgets to encode like suggest_page did.
+        if isinstance(data, str):
+            data = data.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
