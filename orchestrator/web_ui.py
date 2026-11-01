@@ -764,8 +764,7 @@ def form_page_ko():
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> 기어 부품 (체크 시에만 기어 참조 포함)</label>
     <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> 질문 먼저 (답하기 전에는 모델을 만들지 않음)</label>
-    <label><input type="checkbox" name="no_carry" value="on" style="width:auto;"> 같은 도면의 이전 답변 가져오지 않기 (처음부터 새로)</label>
-    <p class="note">기본: 같은 도면의 이전 폴더가 있으면 그 답변·윤곽점·제안을 자동으로 가져와 다시 묻지 않습니다. 같은 윤곽이면 재추적도, 폭 입력도 필요 없습니다.</p>
+    <p class="note">새 작업은 해당 폴더의 내용(도면·윤곽·답변)만 봅니다. 이전 폴더의 질문·답변은 가져오지 않습니다.</p>
     <label for="api_key">Meta API 키</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
     <p class="note">키는 저장되지 않고 이번 실행에만 사용. 비우면 레포 폴더 .env 키 사용.</p>
@@ -908,8 +907,7 @@ def form_page_en():
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (assemble the prompt only)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> Gear part (gear reference included only when checked)</label>
     <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> Ask questions first (no model until you answer)</label>
-    <label><input type="checkbox" name="no_carry" value="on" style="width:auto;"> Don't reuse previous answers for the same drawing (start truly from scratch)</label>
-    <p class="note">Default: when a previous folder holds the same drawing, its answers, outline points and proposal are carried over automatically, so nothing is re-asked. With the same outline, no re-trace and no width entry are needed.</p>
+    <p class="note">A new run looks only at its own folder's contents (drawing, outline, answers). Questions and answers from previous folders are never carried over.</p>
     <label for="api_key">Meta API key</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
     <p class="note">Key is not stored, used only for this run. Empty means use the repo folder .env key.</p>
@@ -1651,6 +1649,22 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
                 f"<div class=\"card\"><h3>♻️ Carried over from a "
                 f"previous run (same drawing — not re-asked)</h3>"
                 f"<pre>{html.escape(_carried_text)}</pre></div>")
+    # View matching card (Nov 1, 2026 user rule): show what the
+    # program matched across views (and profile vs drawing)
+    # before asking, next to the questions.
+    view_matching_card = ""
+    _vm_file = output_dir / "view_matching.txt"
+    if _vm_file.is_file():
+        try:
+            _vm_text = _vm_file.read_text(
+                encoding="utf-8", errors="replace").strip()
+        except OSError:
+            _vm_text = ""
+        if _vm_text:
+            view_matching_card = (
+                f"<div class=\"card\"><h3>🔗 View matching "
+                f"(matched before asking)</h3>"
+                f"<pre>{html.escape(_vm_text)}</pre></div>")
     if not proposal_card:
         _carried_prop = output_dir / "carried_outline_proposal.txt"
         if _carried_prop.is_file():
@@ -1754,7 +1768,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
     # folder is untouched; this is not a patch or a rerun.
     fresh_start_form = f"""
       <div class="card"><h3>🆕 Fresh start with this drawing + outline</h3>
-      <p class="note">Starts a NEW folder from scratch with the same drawing and outline. Previous answers, outline points and proposal are carried over automatically, so nothing is re-asked. The current folder stays as it is.</p>
+      <p class="note">Starts a NEW folder from scratch with the same drawing and outline. Previous answers are NOT carried over — the new folder starts from its own inputs only, and view matching runs fresh. The current folder stays as it is.</p>
       <form action="/fresh-start" method="post" enctype="multipart/form-data">
       <input type="hidden" name="dir" value="{dir_query}">
       <input type="hidden" name="lang" value="{lang}">
@@ -2226,6 +2240,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_display) if questions_display else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
       {proposal_card}
       {carried_card}
+      {view_matching_card}
       {draft_notice}
       {answer_form}
       {fresh_start_form}
@@ -2442,12 +2457,13 @@ class Handler(BaseHTTPRequestHandler):
         lang = pick_lang(fields.get("lang", ""))
         if parsed.path == "/fresh-start":
             # Fresh start (Nov 1, 2026 user rule): same drawing +
-            # outline into a NEW timestamped folder, with the
-            # previous folder as --carry-from. The old folder is
-            # untouched. Translated into a /run submission below:
+            # outline into a NEW timestamped folder. The old folder
+            # is untouched. Translated into a /run submission below:
             # drawing/outline bytes come from the previous folder,
-            # ask-first is on (confirm the proposal, then build),
-            # and the pipeline carries qa/points/proposal.
+            # ask-first is on (confirm the proposal, then build).
+            # Current-folder-only: previous answers are NOT
+            # carried — the new folder starts from its own inputs
+            # and view matching runs fresh.
             raw_dir = fields.get("dir", "")
             try:
                 prev_dir = Path(raw_dir).resolve()
@@ -2470,7 +2486,6 @@ class Handler(BaseHTTPRequestHandler):
                 files["outline"] = (outline_path.name,
                                     outline_path.read_bytes())
             fields["ask_first"] = "on"
-            fields["_carry_from"] = str(prev_dir)
             parsed = parsed._replace(path="/run")
         if parsed.path == "/measure":
             # Real measurement: no API call, no rebuild. Runs
@@ -3086,6 +3101,16 @@ class Handler(BaseHTTPRequestHandler):
             if prev_guidance_path.is_file():
                 prev_guidance = prev_guidance_path.read_text(
                     encoding="utf-8", errors="replace").strip()
+            # View matching from THIS folder's ask-first step
+            # (current-folder content, so it belongs in the
+            # build notes): matched views + profile table, so
+            # the build sketches from matched views, not from
+            # a single view.
+            prev_view_matching = ""
+            prev_vm_path = prev_dir / "view_matching.txt"
+            if prev_vm_path.is_file():
+                prev_view_matching = prev_vm_path.read_text(
+                    encoding="utf-8", errors="replace").strip()
             if rerun:
                 _entry = ("Rerun:\n" + answers) if answers else \
                     "Rerun with no new instructions."
@@ -3115,6 +3140,10 @@ class Handler(BaseHTTPRequestHandler):
                    "these misses must be fixed in this build, not "
                    "repeated):\n" + prev_feature_history
                    if prev_feature_history else "")
+                + ("\nView matching (this folder's ask-first step; "
+                   "matched views and profile table — sketch from "
+                   "these matches):\n" + prev_view_matching
+                   if prev_view_matching else "")
                 + f"\n(Previous run folder: {prev_dir.name})")
 
         dry_run = fields.get("dry_run") == "on"
@@ -3203,10 +3232,7 @@ class Handler(BaseHTTPRequestHandler):
             notes = fields.get("notes", "").strip()
             if notes:
                 command += ["--text", notes]
-            if fields.get("_carry_from"):
-                command += ["--carry-from", fields["_carry_from"]]
-            if fields.get("no_carry") == "on":
-                command.append("--no-carry")
+
             if fields.get("gear") == "on":
                 command.append("--gear")
             if ask_first:

@@ -108,6 +108,11 @@ MACRO_INSTRUCTION = (
     "right after adding it, so the value can be read back exactly. "
     "Every built dimension MUST have a FEATURE_MAP entry; a dimension "
     "without one will show ? in the table, never a guessed value. "
+    "Sketch from matched views: before sketching a feature, match "
+    "it across the front, top, side and section views; one sketch "
+    "per matched feature, driven by the dimensions the views agree "
+    "on; never sketch from a single view what another view "
+    "contradicts. "
     "Feature order (REQUIRED): build ALL Pad and Pocket features "
     "first, in body order, and put ALL finishing operations "
     "(Chamfer, Fillet, Round) LAST, after every Pad/Pocket. Never "
@@ -148,6 +153,65 @@ ASK_FIRST_INSTRUCTION = (
     "you cannot tell the view. Reference dimensions (shown in "
     "parentheses on the drawing) keep their parentheses around the "
     "value, for example D2: lower reference = (1.97) mm @ (0.20, 0.80)."
+)
+
+
+VIEW_MATCHING_INSTRUCTION = (
+    "VIEW MATCHING — do this FIRST, before listing any question, "
+    "using ONLY this run's folder contents (this drawing, this "
+    "outline/profile, this run's user text and answers). Never "
+    "refer to another folder's questions, answers, or models. "
+    "Step 0 — This folder's contents only: the drawing, the "
+    "profile, and the answers in THIS folder are the whole "
+    "evidence. Nothing from any other folder is evidence. "
+    "Step 1 — View inventory: list every view you can identify "
+    "in the drawing: front, top, left/right side, section, "
+    "detail. For each, say what it shows and where its datum "
+    "and centre lines are. "
+    "Step 2 — Cross-view matching: match the SAME feature "
+    "across views before asking anything. The same dimension "
+    "value in several views is the same feature; a circle in "
+    "one view is a rectangle in another; a slot in front is "
+    "lines in side/top; datum planes, centre lines and symmetry "
+    "axes must coincide across views; a section view pairs "
+    "with the view carrying its cutting line, and its inner "
+    "shape constrains the outer views. When views disagree, "
+    "merge into ONE question, never one per view. Anything "
+    "decided by matching is decided — never ask about it again. "
+    "Step 3 — Profile matching: if dimension extension lines, "
+    "datum lines, and the like do NOT let you understand the "
+    "outline and the drawing well, ASK for an outline profile "
+    "(a question: please attach an outline profile) instead of "
+    "guessing the profile. When an outline profile exists, "
+    "apply: profile = shape candidate, drawing = dimensions and "
+    "datum. Handwriting, markers, overlapping lines and cropped "
+    "edges are noise, not geometry. Match feature points — "
+    "overall width and height, hook low points, notch positions "
+    "— to drawing lines and dimensions. Position and scale come "
+    "from drawing dimensions, never from pixels. Output a "
+    "matching table: profile segment -> drawing view + "
+    "dimension. Only unmatched parts become questions. "
+    "Step 4 — Questions last, deduplicated: ask ONLY what "
+    "view-matching and profile-matching could not decide, one "
+    "question per undecided item, citing the matched evidence "
+    "(for example: front width and top width agree, so width is "
+    "decided; thickness appears in no view, so Q: thickness?). "
+    "Merge related items into one question (slot width, angle "
+    "and position = one slot question). "
+    "Step 5 — Sketch guideline: from the matched views, plan "
+    "one sketch per feature — which view defines the sketch "
+    "plane, which dimensions drive it, which view confirms "
+    "depth and thickness — so modeling sketches can be done "
+    "well for any drawing, not just this one. "
+    "Output, before the question list, a section starting with "
+    "exactly this header line:\n"
+    "VIEW MATCHING:\n"
+    "<view inventory, matched features across views, profile "
+    "matching table, and what remains undecided, in prose or a "
+    "simple table. Do NOT use Q-lines or D-lines inside this "
+    "section; describe matches without Q/D labels.>\n"
+    "Then the question list (and the dimension list) follow as "
+    "specified above."
 )
 
 
@@ -239,6 +303,35 @@ def extract_outline_proposal(content):
             continue
         if in_proposal:
             if re.match(r"(?:Q|Question)\s*\d+\s*[:.\-\)]", stripped):
+                break
+            if stripped:
+                lines.append(stripped)
+    return " ".join(lines).strip()
+
+
+def extract_view_matching(content):
+    """Return the VIEW MATCHING section from an ask-first
+    response, or '' when the response has none. Lines from
+    'VIEW MATCHING:' up to (not including) the OUTLINE
+    PROPOSAL header, the first Q-line, or the first D-line
+    are the matching table; the pipeline saves it to
+    view_matching.txt so the result page shows what the
+    program matched before asking, and later builds inherit
+    it through the /answer notes."""
+    lines = []
+    in_section = False
+    for line in (content or "").splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("VIEW MATCHING"):
+            in_section = True
+            rest = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+            if rest:
+                lines.append(rest)
+            continue
+        if in_section:
+            if stripped.upper().startswith("OUTLINE PROPOSAL"):
+                break
+            if re.match(r"(?:Q|Question|D)\s*\d+\s*[:.\-\)]", stripped):
                 break
             if stripped:
                 lines.append(stripped)
@@ -384,6 +477,7 @@ def build_ask_prompt(principles_text, user_text, outline_text=""):
     if outline_text:
         parts.append(outline_text)
     parts.append(ASK_FIRST_INSTRUCTION)
+    parts.append(VIEW_MATCHING_INSTRUCTION)
     return "\n\n".join(parts)
 
 
@@ -3807,69 +3901,6 @@ def md5_file(path):
         return ""
 
 
-def find_same_drawing_folder(drawing_path, output_dir):
-    """Same-drawing sibling folder to carry from, or None.
-
-    Fresh-start convenience (Nov 1, 2026 user rule): a new folder
-    for the same drawing must not start from zero. The match is
-    by file md5, never by name or date, and never across
-    different drawings. Sibling folders only (the parent of the
-    new output dir); the new dir itself is excluded. Returns
-    (folder, any_match): folder is the NEWEST match that actually
-    holds reusable work (qa_history, outline points, or a
-    proposal) — a newest-but-empty folder (inputs saved, run
-    failed before ask-first) must not shadow an older folder
-    that has the answers. any_match says whether ANY same-
-    drawing folder exists at all, so the caller can report
-    "found, but nothing reusable" instead of silence.
-    """
-    target = md5_file(drawing_path)
-    if not target:
-        return (None, False)
-    parent = Path(output_dir).parent
-    if not parent.is_dir():
-        return (None, False)
-    candidates = []
-    try:
-        entries = list(parent.iterdir())
-    except OSError:
-        return (None, False)
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        try:
-            if entry.resolve() == Path(output_dir).resolve():
-                continue
-        except OSError:
-            continue
-        for cand in sorted(entry.glob("input_drawing.*")):
-            if md5_file(cand) == target:
-                try:
-                    candidates.append((entry.stat().st_mtime, entry))
-                except OSError:
-                    pass
-                break
-    if not candidates:
-        return (None, False)
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    # Priority: answers first. The user's own words are the
-    # hardest to reproduce, so the newest folder WITH answers
-    # wins over a newer points-only folder (e.g. a trace-only
-    # run) that would otherwise shadow them. Points/proposal
-    # ride along when the winning folder has them; otherwise
-    # the new run re-traces (width from Q0, as before).
-    for _mtime, folder in candidates:
-        if ((folder / "qa_history.txt").is_file()
-                or (folder / "carried_qa_history.txt").is_file()):
-            return (folder, True)
-    for _mtime, folder in candidates:
-        if ((folder / "outline_points.json").is_file()
-                or (folder / "outline_proposal.txt").is_file()
-                or (folder / "carried_outline_proposal.txt").is_file()):
-            return (folder, True)
-    return (None, True)
-
-
 def apply_carry_over(output_dir, source_dir, with_points=True):
     """Copy reusable work from a same-drawing folder into a new one.
 
@@ -4934,12 +4965,11 @@ def parse_args(argv=None):
                         "carries its own scale. No rebuild, no "
                         "API call, model/macro/report unchanged.")
     parser.add_argument("--carry-from", default="",
-                        help="Previous run folder for the same drawing: "
-                        "its qa_history, outline points and proposal "
-                        "are carried into this fresh run.")
-    parser.add_argument("--no-carry", action="store_true",
-                        help="Do not auto-carry from a same-drawing "
-                        "folder; start truly from scratch.")
+                        help="EXPLICIT manual override only (the web UI "
+                        "never passes it): previous run folder for the "
+                        "same drawing, whose qa_history, outline points "
+                        "and proposal are carried into this fresh run. "
+                        "Default is current-folder-only: no carry.")
     parser.add_argument("--outline-width-mm", type=float, default=None,
                         help="Real width (mm) of the outline image "
                         "for tracing: scale = width / outline "
@@ -5030,14 +5060,15 @@ def main(argv=None):
     drawing_path = Path(args.drawing)
     if not drawing_path.is_file():
         die(f"drawing file not found: {drawing_path}")
-    # Fresh-start carry-over (Nov 1, 2026 user rule): a new folder
-    # for the SAME drawing inherits the previous folder's answers,
-    # traced outline points and proposal, so the user is never
-    # re-asked from scratch (the 225144 -> 002938 loss). Explicit
-    # --carry-from wins; otherwise the newest same-drawing
-    # sibling is auto-found, unless --no-carry opts out. An
-    # explicit folder whose drawing differs is ignored, never
-    # trusted — a wrong carry is worse than no carry.
+    # Current-folder-only rule (Nov 1, 2026 user direction,
+    # correcting the 94373c2b auto-carry): a new run refers
+    # ONLY to this folder's contents (this drawing, this
+    # outline/profile, this run's answers). Previous folders'
+    # questions and answers are NEVER brought in automatically.
+    # --carry-from remains as an explicit, manual CLI override
+    # only (the web UI never passes it); a folder whose drawing
+    # differs is ignored, never trusted — a wrong carry is
+    # worse than no carry.
     carried = None
     carry_source = None
     if args.carry_from:
@@ -5050,22 +5081,13 @@ def main(argv=None):
             report_lines.append(
                 "Carry-over: --carry-from ignored (folder missing "
                 "or different drawing).")
-    elif not args.no_carry:
-        _found, _any_match = find_same_drawing_folder(
-            drawing_path, output_dir)
-        carry_source = _found
-        if carry_source is None and _any_match:
-            report_lines.append(
-                "Carry-over: same drawing folder found, but it "
-                "holds no reusable answers, points or proposal.")
     if carry_source is not None:
         carried = apply_carry_over(output_dir, carry_source,
                                    with_points=bool(args.outline))
         report_lines.append(
-            f"Carried from {carried['source']}: "
+            f"Carried from {carried['source']} (explicit "
+            f"--carry-from only): "
             f"{', '.join(carried['items']) if carried['items'] else 'nothing reusable'}.")
-    elif args.no_carry:
-        report_lines.append("Carry-over: disabled (--no-carry).")
     principles_text = load_text(args.principles, "principles file")
 
     gear_text = ""
@@ -5330,6 +5352,23 @@ def main(argv=None):
                     "(confirm with Q0).")
             elif _proposal_path.is_file():
                 _proposal_path.unlink()
+        except OSError:
+            pass
+        # View matching (Nov 1, 2026 user rule): the matching
+        # table is saved where the result page shows it next to
+        # the questions, so the user sees WHAT the program
+        # matched across views (and profile vs drawing) before
+        # answering. A run with no matching section must not
+        # leave a stale table from an earlier run.
+        _vm_path = output_dir / "view_matching.txt"
+        _vm = extract_view_matching(content)
+        try:
+            if _vm:
+                _vm_path.write_text(_vm + "\n", encoding="utf-8")
+                report_lines.append(
+                    "View matching: see view_matching.txt.")
+            elif _vm_path.is_file():
+                _vm_path.unlink()
         except OSError:
             pass
         questions = extract_questions(content, "")
