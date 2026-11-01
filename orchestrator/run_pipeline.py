@@ -3606,6 +3606,288 @@ def run_build_table_mode(output_dir, freecadcmd):
     return _finish(0)
 
 
+def extract_outline_points_from_json(data):
+    """Snap-tool outline JSON -> numeric mm outline, or None.
+
+    Preference order (all from the tool's own calibration, never
+    guessed): (1) fills.auto_closed_outlines largest polygon_mm
+    (other outlines inside its bbox are holes, per the tool's
+    own note); (2) points[].mm in click_seq order; (3) a closed
+    lines[] entry's points_mm. Any list with a null mm entry
+    is skipped — uncalibrated px points are never presented
+    as mm. Returns a dict like trace_outline.py's output
+    (source, points_mm, holes_mm), or None.
+    """
+    if not isinstance(data, dict):
+        return None
+
+    def _mm_list(raw):
+        if not isinstance(raw, list) or len(raw) < 3:
+            return None
+        out = []
+        for p in raw:
+            if not isinstance(p, dict):
+                return None
+            x, y = p.get("x"), p.get("y")
+            if x is None or y is None:
+                return None
+            out.append([round(float(x), 4), round(float(y), 4)])
+        return out
+
+    fills = data.get("fills") or {}
+    outlines = fills.get("auto_closed_outlines") or []
+    cands = []
+    for o in outlines:
+        if not isinstance(o, dict):
+            continue
+        pts = _mm_list(o.get("polygon_mm"))
+        if pts:
+            cands.append((float(o.get("area_px2") or 0), pts))
+    if cands:
+        cands.sort(key=lambda t: -t[0])
+        outer = cands[0][1]
+        ox = [p[0] for p in outer]
+        oy = [p[1] for p in outer]
+        holes = []
+        for _, pts in cands[1:]:
+            if (min(p[0] for p in pts) >= min(ox)
+                    and max(p[0] for p in pts) <= max(ox)
+                    and min(p[1] for p in pts) >= min(oy)
+                    and max(p[1] for p in pts) <= max(oy)):
+                holes.append(pts)
+        return {"source": "snap_json_fills", "points_mm": outer,
+                "holes_mm": holes, "bottom_cropped": False}
+    points = data.get("points") or []
+    pts = []
+    for p in sorted(points, key=lambda q: q.get("click_seq", 0)
+                    if isinstance(q, dict) else 0):
+        if not isinstance(p, dict):
+            continue
+        mm = p.get("mm")
+        if not isinstance(mm, dict) or mm.get("x") is None \
+                or mm.get("y") is None:
+            return None
+        pts.append([round(float(mm["x"]), 4),
+                    round(float(mm["y"]), 4)])
+    if len(pts) >= 3:
+        return {"source": "snap_json_points", "points_mm": pts,
+                "holes_mm": [], "bottom_cropped": False}
+    for line in data.get("lines") or []:
+        if not isinstance(line, dict) or not line.get("closed"):
+            continue
+        pts = _mm_list(line.get("points_mm"))
+        if pts:
+            return {"source": "snap_json_line", "points_mm": pts,
+                    "holes_mm": [], "bottom_cropped": False}
+    return None
+
+
+def load_outline_points(output_dir):
+    """outline_points.json in a folder, validated, or None."""
+    path = output_dir / "outline_points.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if data.get("error"):
+        return None
+    pts = data.get("points_mm")
+    if not isinstance(pts, list) or len(pts) < 3:
+        return None
+    return data
+
+
+def format_outline_points_text(data):
+    """Prompt section carrying traced outline points as numbers.
+
+    This is the whole point of the trace step: the LLM gets
+    coordinates to COPY, not an image to eyeball. The section
+    also says what the coordinates are NOT: Y = 0 is the
+    outline bottom (or a crop edge), never a dimension, and
+    holes are inner voids, never outer contour.
+    """
+    if not data:
+        return ""
+    pts = data.get("points_mm") or []
+    lines = ["TRACED OUTLINE — numeric points, copy exactly:"]
+    lines.append(f"Source: {data.get('source', 'unknown')}. "
+                 "The sketch for the outline feature MUST use "
+                 "these points as a closed polyline, in this "
+                 "order, closing back to the first point. Do NOT "
+                 "invent other coordinates for that feature, do "
+                 "NOT flip X/Y, do NOT mirror it.")
+    if data.get("bottom_cropped"):
+        lines.append("WARNING: the outline image bottom is cropped "
+                     "(green touches the image edge), so Y = 0 is "
+                     "the crop edge, NOT a design edge. Close the "
+                     "profile at the real datum/base from the "
+                     "drawing; do not treat Y = 0 as a dimension.")
+    else:
+        lines.append("X = 0 is the outline centre, Y = 0 is the "
+                     "outline bottom (see source for the exact "
+                     "datum); scale/origin come from the trace, "
+                     "not from the drawing's other dimensions.")
+    for i, (x, y) in enumerate(pts, 1):
+        lines.append(f"P{i}: ({x:.4f}, {y:.4f}) mm")
+    for hi, hole in enumerate(data.get("holes_mm") or [], 1):
+        lines.append(f"Inner closed void {hi} (cut as a pocket, "
+                     "NOT outer contour):")
+        for i, (x, y) in enumerate(hole, 1):
+            lines.append(f"  H{hi}P{i}: ({x:.4f}, {y:.4f}) mm")
+    return "\n".join(lines)
+
+
+def outline_text_check(macro_text, points_mm):
+    """Best-effort, log-only check: how many traced points
+    appear in the macro text on a single line (Vector/tuple
+    point, ±0.05 mm). A B-spline through the points uses
+    control points that differ, so a low count is a hint,
+    never a gate — the caller logs it, never fails on it."""
+    if not macro_text or not points_mm:
+        return (0, len(points_mm or []))
+    nums_by_line = []
+    for line in macro_text.splitlines():
+        nums = []
+        for m in re.finditer(r"-?\d+(?:\.\d+)?", line):
+            try:
+                nums.append(float(m.group(0)))
+            except ValueError:
+                pass
+        nums_by_line.append(nums)
+    matched = 0
+    for x, y in points_mm:
+        ok = any(any(abs(n - x) <= 0.05 for n in nums)
+                 and any(abs(n - y) <= 0.05 for n in nums)
+                 for nums in nums_by_line)
+        if ok:
+            matched += 1
+    return (matched, len(points_mm))
+
+
+def run_trace_outline_mode(output_dir, freecadcmd, image_path,
+                           width_mm):
+    """Trace step: outline image/JSON -> outline_points.json.
+
+    JSON input needs no image processing: its mm polygon is
+    extracted directly. Image input runs trace_outline.py under
+    freecadcmd (bundled PIL) into outline_traced.json, then
+    copies it to outline_points.json ONLY on success — a
+    failed trace never overwrites a previous good trace.
+    Returns 0 on success, 1 on failure (log in trace_log.txt).
+    """
+    log_lines = []
+
+    def _log(msg):
+        log_lines.append(msg)
+        print(msg)
+
+    def _finish(code):
+        (output_dir / "trace_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return code
+
+    if image_path is None:
+        cands = sorted(output_dir.glob("input_outline.*"))
+        image_path = None
+        for c in cands:
+            if c.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                    ".webp", ".bmp", ".gif"):
+                image_path = c
+                break
+        if image_path is None and cands:
+            image_path = cands[0]
+    if image_path is None or not Path(image_path).is_file():
+        _log("TRACE FAIL: no outline file in this folder "
+             "(attach an outline image or snap-tool JSON first).")
+        return _finish(1)
+    image_path = Path(image_path)
+    if image_path.suffix.lower() == ".json":
+        try:
+            data = json.loads(image_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _log(f"TRACE FAIL: outline JSON unreadable: {exc}")
+            return _finish(1)
+        pts = extract_outline_points_from_json(data)
+        if pts is None:
+            _log("TRACE FAIL: snap JSON has no calibrated mm "
+                 "polygon/points (calibrate in the snap tool "
+                 "first, or trace a green-filled image).")
+            return _finish(1)
+        pts["source_image"] = image_path.name
+        (output_dir / "outline_points.json").write_text(
+            json.dumps(pts, indent=1, ensure_ascii=False),
+            encoding="utf-8")
+        _log(f"TRACE OK (snap JSON): {len(pts['points_mm'])} points, "
+             f"{len(pts['holes_mm'])} hole(s) -> outline_points.json")
+        return _finish(0)
+    script = Path(__file__).resolve().parent / "trace_outline.py"
+    if not script.is_file():
+        _log("TRACE FAIL: trace_outline.py missing next to "
+             "run_pipeline.py")
+        return _finish(1)
+    traced_path = output_dir / "outline_traced.json"
+    overlay_path = output_dir / "outline_traced_overlay.png"
+    env = dict(os.environ)
+    env["TRACE_IMAGE"] = str(image_path)
+    env["TRACE_OUT"] = str(traced_path)
+    env["TRACE_OVERLAY"] = str(overlay_path)
+    if width_mm is not None:
+        env["TRACE_WIDTH_MM"] = str(width_mm)
+    with open(output_dir / "trace_run.log", "w",
+              encoding="utf-8") as log_file:
+        subprocess.run([freecadcmd, str(script)],
+                       stdout=log_file, stderr=subprocess.STDOUT,
+                       env=env)
+    if not traced_path.is_file():
+        _log("TRACE FAIL: trace_outline.py wrote no output "
+             "(see trace_run.log)")
+        return _finish(1)
+    try:
+        data = json.loads(traced_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log(f"TRACE FAIL: traced output unreadable: {exc}")
+        return _finish(1)
+    if data.get("error"):
+        _log(f"TRACE FAIL: {data['error']}")
+        return _finish(1)
+    if not data.get("points_mm"):
+        _log("TRACE FAIL: traced image has no mm points "
+             "(outline width in mm is required for an image "
+             "trace; a snap-tool JSON carries its own scale).")
+        return _finish(1)
+    shutil.copyfile(traced_path, output_dir / "outline_points.json")
+    _log(f"TRACE OK: {data.get('point_count')} points, "
+         f"{data.get('hole_count')} hole(s), "
+         f"bottom_cropped={data.get('bottom_cropped')} -> "
+         "outline_points.json (+ outline_traced_overlay.png)")
+    return _finish(0)
+
+
+def build_patch_messages(prompt, outline_image):
+    """Patch call messages: text-only when there is no outline
+    image (unchanged old behaviour), text + outline image when
+    the folder carries one (Nov 1, 2026 user rule: resend the
+    outline image on patch, ONLY when it exists). outline_image
+    is (base64, mime) or None. No drawing image is sent on patch
+    — patch edits an existing macro, it does not re-read the
+    drawing."""
+    if outline_image is None:
+        return [{"role": "user", "content": prompt}]
+    b64, mime = outline_image
+    return [{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "text",
+         "text": "Outline image (user-captured outline, from the "
+                 "folder's input_outline image — use it to check "
+                 "the outline feature's shape against the traced "
+                 "points above, not to invent new coordinates):"},
+        {"type": "image_url",
+         "image_url": {"url": f"data:{mime};base64,{b64}"}},
+    ]}]
+
+
 def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
                      dry_run):
     """Suggest DRAFT answers for questions.txt — nothing else.
@@ -3971,12 +4253,39 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
         + (f"Previous guidance:\n{guidance_text}\n\n" if guidance_text else "")
         + (f"Q&A history (user-confirmed; do not contradict it):\n"
            f"{qa_text}\n\n" if qa_text.strip() else "")
+        + (f"Traced outline points (numeric — the outline "
+           f"feature's sketch MUST use these, see the section "
+           f"above for the copy rule):\n"
+           f"{format_outline_points_text(load_outline_points(output_dir))}\n\n"
+           if load_outline_points(output_dir) else "")
         + "Existing macro.py:\n```python\n" + macro_text + "\n```\n"
         + f"Save the patched model to {fcstd_path} and the STEP "
         f"export to {step_path} (the macro already does this; "
         f"do not change its output paths)."
     )
     (output_dir / "patch_prompt.txt").write_text(prompt, encoding="utf-8")
+    # Patch resends the outline image — ONLY when the folder
+    # carries one (Nov 1, 2026 user rule). Previously patch was
+    # text-only, so after the second question round the patch
+    # LLM could not see the green outline at all, and "follow
+    # the green outline" was words without coordinates. When no
+    # outline image exists, the call stays text-only, exactly
+    # as before. JSON outlines are not images and are not sent
+    # (their numeric points, above, are the usable form).
+    _outline_image_patch = None
+    for _cand in sorted(output_dir.glob("input_outline.*")) + \
+            sorted(output_dir.glob("outline_input.*")):
+        if _cand.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                    ".webp", ".bmp", ".gif"):
+            try:
+                _mime, _ = mimetypes.guess_type(str(_cand))
+                _outline_image_patch = (
+                    base64.b64encode(_cand.read_bytes()).decode("ascii"),
+                    _mime or "image/png")
+                _log(f"PATCH: outline image resent from {_cand.name}")
+            except OSError:
+                pass
+            break
     if dry_run:
         _log("PATCH DRY-RUN: prompt written to patch_prompt.txt, "
              "no API call, no macro change")
@@ -3987,9 +4296,9 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
              "or local .env)")
         return _finish(1)
     try:
-        response_json = call_api(api_key, model, max_tokens,
-                                 [{"role": "user",
-                                   "content": prompt}])
+        response_json = call_api(
+            api_key, model, max_tokens,
+            build_patch_messages(prompt, _outline_image_patch))
         content = extract_content(response_json)
     except RuntimeError as exc:
         _log(f"PATCH FAIL: API error: {exc}")
@@ -4126,6 +4435,17 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
     # Answered questions were already removed from questions.txt
     # BEFORE the patch ran (see above), so nothing is left to
     # clean up here on success; unanswered questions stay.
+    # Outline check (log-only, never a gate) on patch success.
+    try:
+        _op = load_outline_points(output_dir)
+        _pts = (_op or {}).get("points_mm") if _op else None
+        if _pts:
+            _m, _t = outline_text_check(new_text, _pts)
+            _log(f"PATCH: outline check: {_m}/{_t} traced points "
+                 "appear in patched macro text (per-line, ±0.05 mm; "
+                 "B-spline control points may differ, hint only)")
+    except Exception:
+        pass
     # Point 2 (Nov 1, 2026 user rule): a successful patch must
     # not leave the table missing — build it if it is absent.
     try:
@@ -4243,6 +4563,20 @@ def parse_args(argv=None):
                         "applied until the user edits + confirms it "
                         "via /answer. With --dry-run it writes "
                         "suggest_prompt.txt and calls no API.")
+    parser.add_argument("--trace-outline", action="store_true",
+                        help="Trace step: outline image/JSON in "
+                        "--output-dir (or --outline) -> "
+                        "outline_points.json (numeric mm points "
+                        "for later prompts). Image traces need "
+                        "--outline-width-mm; snap-tool JSON "
+                        "carries its own scale. No rebuild, no "
+                        "API call, model/macro/report unchanged.")
+    parser.add_argument("--outline-width-mm", type=float, default=None,
+                        help="Real width (mm) of the outline image "
+                        "for tracing: scale = width / outline "
+                        "pixel width, X = 0 at outline centre. "
+                        "Required for image traces; ignored for "
+                        "snap-tool JSON (it is calibrated).")
     parser.add_argument("--build-table", action="store_true",
                         help="Build (or rebuild) matching.json without "
                         "rebuilding the model (web matching tab's "
@@ -4291,6 +4625,10 @@ def main(argv=None):
     if args.remap:
         return run_remap_mode(output_dir, args.freecadcmd, args.model,
                               args.max_tokens, args.dry_run)
+    if args.trace_outline:
+        _img = Path(args.outline) if args.outline else None
+        return run_trace_outline_mode(output_dir, args.freecadcmd,
+                                      _img, args.outline_width_mm)
     if args.build_table:
         return run_build_table_mode(output_dir, args.freecadcmd)
     if args.suggest:
@@ -4303,7 +4641,7 @@ def main(argv=None):
     if args.images:
         return run_images_mode(output_dir, args.freecadcmd)
     if not args.drawing:
-        die("--drawing is required unless --measure, --inspect, --remap, --patch, --images, --suggest, or --build-table is given.")
+        die("--drawing is required unless --measure, --inspect, --remap, --patch, --images, --suggest, --build-table, or --trace-outline is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():
@@ -4371,6 +4709,53 @@ def main(argv=None):
                 + outline_path.read_text(encoding="utf-8", errors="replace")[:8000])
             report_lines.append(
                 f"Outline: {outline_path} (text, copy at {outline_copy})")
+
+    # Traced outline points (Nov 1, 2026 user rule): an image
+    # alone is eyeballed and mis-copied, so when numeric points
+    # exist they go into EVERY prompt of this run (base + retry,
+    # via outline_text) as coordinates to copy. JSON outlines
+    # carry their own calibration; image outlines are traced
+    # only when an outline width in mm is given (without a
+    # scale, px points must never be presented as mm). Tracing
+    # is best-effort here: a trace failure never fails the
+    # build, it just leaves the image-only behaviour + a note.
+    outline_points_data = None
+    if args.outline and outline_suffix.lower() == ".json":
+        try:
+            outline_points_data = extract_outline_points_from_json(
+                outline_data)
+        except Exception:
+            outline_points_data = None
+        if outline_points_data is not None:
+            outline_points_data["source_image"] = outline_path.name
+            (output_dir / "outline_points.json").write_text(
+                json.dumps(outline_points_data, indent=1,
+                           ensure_ascii=False), encoding="utf-8")
+            report_lines.append(
+                f"Outline trace: snap JSON -> outline_points.json "
+                f"({len(outline_points_data['points_mm'])} points)")
+    elif args.outline and outline_image is not None \
+            and args.outline_width_mm is not None:
+        try:
+            if run_trace_outline_mode(
+                    output_dir, args.freecadcmd, outline_path,
+                    args.outline_width_mm) == 0:
+                outline_points_data = load_outline_points(output_dir)
+                report_lines.append(
+                    "Outline trace: image -> outline_points.json "
+                    "(see trace_log.txt)")
+            else:
+                report_lines.append(
+                    "Outline trace: FAILED (see trace_log.txt); "
+                    "continuing with the outline image only.")
+        except Exception as exc:
+            report_lines.append(
+                f"Outline trace: skipped ({exc}); continuing with "
+                "the outline image only.")
+    _points_text = format_outline_points_text(outline_points_data)
+    if _points_text:
+        outline_text = (outline_text + "\n\n" + _points_text
+                        if outline_text else _points_text)
 
     base_prompt = build_prompt(principles_text, gear_text, args.text,
                                output_dir, outline_text)
@@ -4862,6 +5247,20 @@ def main(argv=None):
                     f"{method_txt}")
         except Exception as exc:
             report_lines.append(f"Matching: unavailable ({exc})")
+        # Outline check (log-only, never a gate): did the built
+        # macro actually copy the traced points?
+        try:
+            _pts = (outline_points_data or {}).get("points_mm") \
+                if outline_points_data else None
+            if _pts:
+                _m, _t = outline_text_check(macro_text, _pts)
+                report_lines.append(
+                    f"Outline check: {_m}/{_t} traced points appear "
+                    "in macro text (per-line, ±0.05 mm; B-spline "
+                    "control points may differ, so this is a hint, "
+                    "not a gate)")
+        except Exception:
+            pass
         # Point 2 (Nov 1, 2026 user rule): a later successful
         # build must not leave the table missing. If the block
         # above did not leave D-rows (exception, no map, no

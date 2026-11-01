@@ -333,6 +333,28 @@ S = {
                                "표 만들기에 실패했습니다. 폴더의 "
                                "table_log.txt를 보세요. 모델은 바뀌지 "
                                "않았습니다."),
+    "trace_btn": ("Trace outline", "윤곽 추적"),
+    "trace_note": ("Traces the folder's outline into numeric mm "
+                   "points (outline_points.json) for later builds "
+                   "and patches: green-filled image -> contour "
+                   "under freecadcmd, or snap-tool JSON -> its "
+                   "calibrated polygon. No rebuild, no API call, "
+                   "model/macro/report unchanged. Image traces "
+                   "need the real outline width below; JSON "
+                   "traces do not.",
+                   "폴더의 윤곽을 숫자 mm 점(outline_points.json)으로 "
+                   "추적합니다. 이후 빌드와 패치가 이 숫자를 그대로 "
+                   "씁니다. 녹색 채움 이미지는 freecadcmd로 외곽선을 "
+                   "따고, 스냅 툴 JSON은 자체 보정 다각형을 씁니다. "
+                   "다시 만들기 없음, API 호출 없음, 모델·매크로·"
+                   "보고서는 바뀌지 않습니다. 이미지 추적에는 아래 "
+                   "실제 윤곽 폭이 필요하고, JSON 추적에는 필요 "
+                   "없습니다."),
+    "err_trace_failed": ("Outline tracing failed. See trace_log.txt "
+                         "in the folder. The model was not changed.",
+                         "윤곽 추적에 실패했습니다. 폴더의 "
+                         "trace_log.txt를 보세요. 모델은 바뀌지 "
+                         "않았습니다."),
     "inspect_history_title": ("Feature-check history", "특징 검사 이력"),
     "err_inspect_failed": ("Feature check failed. See web_ui_inspect.log "
                            "in the folder.",
@@ -731,6 +753,9 @@ def form_page_ko():
     <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt">
     <img id="outlinePreview" class="preview-live" alt="윤곽 미리보기">
     <p class="note">outline_snap_tool.html 출력 JSON 또는 윤곽 이미지. 원본은 출력 폴더에 input_outline.* 로 보관.</p>
+    <label for="outline_width_mm">윤곽 실제 폭 (mm, 선택 — 이미지 추적용)</label>
+    <input type="text" id="outline_width_mm" name="outline_width_mm" placeholder="예: 4.8">
+    <p class="note">이미지 윤곽을 숫자로 추적할 때만 씁니다. 이 폭으로 픽셀을 mm로 바꿉니다. JSON 윤곽은 자체 보정이 있어서 필요 없습니다.</p>
     <hr>
     <h3 style="font-size:14px;">&#129521; 실행 설정</h3>
     <label for="output_dir">출력 폴더</label>
@@ -870,6 +895,9 @@ def form_page_en():
     <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt">
     <img id="outlinePreview" class="preview-live" alt="Outline preview">
     <p class="note">outline_snap_tool.html output JSON or an outline image. The original is kept in the output folder as input_outline.*.</p>
+    <label for="outline_width_mm">Outline real width (mm, optional — for image tracing)</label>
+    <input type="text" id="outline_width_mm" name="outline_width_mm" placeholder="e.g. 4.8">
+    <p class="note">Only used to trace an image outline into numbers: pixels become mm by this width. A JSON outline carries its own calibration and needs no width.</p>
     <hr>
     <h3 style="font-size:14px;">&#129521; Run settings</h3>
     <label for="output_dir">Output folder</label>
@@ -1933,6 +1961,26 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
             f"{tr(lang, 'build_table_btn')}</button></form>"
             f"<p class=\"note\">{tr(lang, 'build_table_note')}</p>")
 
+    # Trace button: outline image/JSON in this folder ->
+    # outline_points.json, for later builds/patches. Shown when
+    # the folder carries an outline file at all.
+    trace_block = ""
+    if list(output_dir.glob("input_outline.*")) or \
+            list(output_dir.glob("outline_input.*")):
+        trace_block = (
+            f"<form action=\"/trace\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"dir\" value=\"{html.escape(str(output_dir))}\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<label>freecadcmd <input type=\"text\" name=\"freecadcmd\" "
+            f"value=\"freecadcmd\"></label> "
+            f"<label>{tr(lang, 'trace_btn')} width (mm, image only) "
+            f"<input type=\"text\" name=\"outline_width_mm\" "
+            f"placeholder=\"4.8\"></label> "
+            f"<button class=\"btn\" type=\"submit\">"
+            f"{tr(lang, 'trace_btn')}</button></form>"
+            f"<p class=\"note\">{tr(lang, 'trace_note')}</p>")
+
     measure_block = ""
     step_path = output_dir / "model.step"
     if step_path.is_file():
@@ -2108,6 +2156,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <p class="note">{tr(lang, 'matching_note')}</p>
       {export_open}{matching_table}{export_close}
       {build_table_block}
+      {trace_block}
       {measure_block}
       {inspect_block}
       {inspect_card}
@@ -2306,7 +2355,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest", "/build-table"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest", "/build-table", "/trace"):
             self.send_error(404, "Not found")
             return
         try:
@@ -2364,6 +2413,51 @@ class Handler(BaseHTTPRequestHandler):
                     timeout=3600, env=measure_env)
             if result.returncode != 0:
                 data = error_page(tr(lang, "err_measure_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/trace":
+            # Trace the outline: no API call, no rebuild. Runs
+            # run_pipeline.py --trace-outline on the folder's
+            # outline file, then shows the result page. The
+            # width field is required for image traces only;
+            # a snap-tool JSON trace ignores it.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--trace-outline",
+                       "--output-dir", str(output_dir),
+                       "--freecadcmd", freecadcmd_value]
+            _ow = (fields.get("outline_width_mm", "") or "").strip()
+            if _ow:
+                try:
+                    float(_ow)
+                    command += ["--outline-width-mm", _ow]
+                except ValueError:
+                    pass
+            log_path = output_dir / "web_ui_trace.log"
+            tr_env = dict(os.environ)
+            tr_env["PYTHONUTF8"] = "1"
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=tr_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_trace_failed"), lang=lang)
                 self._send_html(400, data)
                 return
             data = result_page(output_dir, 0, lang=lang)
@@ -3004,6 +3098,13 @@ class Handler(BaseHTTPRequestHandler):
                 outline_path = output_dir / f"input_outline{outline_suffix}"
                 outline_path.write_bytes(outline_bytes)
                 command += ["--outline", str(outline_path)]
+            _ow = (fields.get("outline_width_mm", "") or "").strip()
+            if _ow:
+                try:
+                    float(_ow)
+                    command += ["--outline-width-mm", _ow]
+                except ValueError:
+                    pass
             notes = fields.get("notes", "").strip()
             if notes:
                 command += ["--text", notes]
