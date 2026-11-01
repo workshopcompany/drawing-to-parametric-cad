@@ -1554,6 +1554,16 @@ def prune_answered_questions(output_dir, require_text_match=True):
                 continue
             if ans == question_dict[label]:
                 continue
+            # Numeric-completeness (Nov 1, 2026 user rule, mirrors
+            # run_pipeline.requests_number): an answer to a
+            # question that asks the user to SUPPLY a number (Q0
+            # width in mm) but contains no digit does not count
+            # as answered — the question stays visible.
+            _q = question_dict[label]
+            if ((_re.search(r"(width|폭)[^0-9]{0,30}mm", _q, _re.IGNORECASE)
+                 or ("give" in _q.lower() and "mm" in _q.lower()))
+                    and not _re.search(r"\d", ans)):
+                continue
             if require_text_match and hist_q.get(label) != question_dict[label]:
                 continue
             removed.append(label)
@@ -1665,6 +1675,44 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
                 f"<div class=\"card\"><h3>🔗 View matching "
                 f"(matched before asking)</h3>"
                 f"<pre>{html.escape(_vm_text)}</pre></div>")
+    # Partial-model card (Nov 1, 2026 user rule): when a build
+    # stopped mid-macro, no model.fcstd/step exists, but per-feature
+    # diag files survived. Show them as the partial state (with
+    # the last OK feature from feature_history.json) instead of
+    # leaving the user with only a question list and nothing to
+    # look at. Diag files are NOT the final model.
+    partial_card = ""
+    if (not (output_dir / "model.fcstd").is_file()
+            and not (output_dir / "model.step").is_file()):
+        _diags = sorted(
+            (p for p in output_dir.iterdir()
+             if p.is_file() and p.name.startswith("diag_")
+             and p.suffix.lower() == ".fcstd"),
+            key=lambda p: p.name) if output_dir.is_dir() else []
+        if _diags:
+            _last_ok = ""
+            try:
+                _hist = json.loads(
+                    (output_dir / "feature_history.json").read_text(
+                        encoding="utf-8"))
+                _oks = [f["feature"] for f in _hist.get("features", [])
+                        if f.get("verdict") == "OK"]
+                if _oks:
+                    _last_ok = _oks[-1]
+            except Exception:
+                pass
+            _links = "".join(
+                f"<li><a href=\"/download?{urllib.parse.urlencode({'dir': str(output_dir), 'file': p.name})}\">{html.escape(p.name)}</a></li>"
+                for p in _diags)
+            _upto = (f" State up to last OK feature: "
+                     f"{html.escape(_last_ok)}." if _last_ok else "")
+            partial_card = (
+                f"<div class=\"card\"><h3>🧩 Partial model "
+                f"(build stopped mid-way — not the final model)</h3>"
+                f"<p class=\"note\">The macro stopped before saving "
+                f"model.fcstd/model.step. These per-feature files "
+                f"are the state that did survive.{_upto}</p>"
+                f"<ul>{_links}</ul></div>")
     if not proposal_card:
         _carried_prop = output_dir / "carried_outline_proposal.txt"
         if _carried_prop.is_file():
@@ -2241,6 +2289,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       {proposal_card}
       {carried_card}
       {view_matching_card}
+      {partial_card}
       {draft_notice}
       {answer_form}
       {fresh_start_form}

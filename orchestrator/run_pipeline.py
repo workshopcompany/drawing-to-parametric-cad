@@ -815,6 +815,357 @@ def write_questions(output_dir, questions):
     return True
 
 
+# ---- General question rules (Nov 1, 2026 user direction) ----
+# The program handles these mechanically. The user is never asked
+# to work around them by hand (no "type the width yourself, then
+# Continue" recipes): width is derived, reflection is checked in
+# the artifact, and a repeated question says WHY it came back.
+
+_TOPIC_WORDS_EN = ("slot", "wing", "section", "center", "centre",
+                   "datum", "depth", "thickness", "groove", "rib",
+                   "taper", "bevel", "radius", "fillet", "outline",
+                   "lower", "upper", "nose", "apex", "offset", "line",
+                   "hook", "peak", "block", "position", "width",
+                   "height", "neck", "plan", "detail", "mapping",
+                   "layout", "form", "shape", "curve", "extent",
+                   "condition", "intersection")
+_TOPIC_WORDS_KO_TO_EN = {"슬롯": "slot", "날개": "wing", "단면": "section",
+                         "중심": "center", "기준면": "datum",
+                         "두께": "thickness", "깊이": "depth",
+                         "홈": "groove", "리브": "rib", "윤곽": "outline",
+                         "하단": "lower", "상단": "upper", "목": "neck",
+                         "선": "line", "매칭": "matching", "위치": "position",
+                         "폭": "width", "높이": "height",
+                         "형상": "shape", "꼭지점": "apex"}
+
+
+def _question_topic_tokens(text):
+    """Distinctive tokens of a question: numbers + feature words.
+
+    Numbers count only with a decimal point or 2+ digits, so a
+    bare count ("2 places") never matches by itself. Korean words
+    map to the same English canonical tokens, so a Korean answer
+    can match an English question on topic.
+    """
+    low = (text or "").lower()
+    toks = set()
+    for m in re.finditer(r"\d+\.\d+|\d+", low):
+        tok = m.group(0)
+        if "." in tok or len(tok) >= 2:
+            toks.add("n:" + tok)
+    for w in _TOPIC_WORDS_EN:
+        # Whole-word match: "section" must not match inside
+        # "intersection".
+        if re.search(r"\b" + re.escape(w) + r"\b", low):
+            toks.add("w:" + w)
+    for ko, en in _TOPIC_WORDS_KO_TO_EN.items():
+        if ko in (text or ""):
+            toks.add("w:" + en)
+    return toks
+
+
+def _same_topic(a, b):
+    """Conservative topic match: shared number + shared word, or
+    2+ shared words. A weak match is treated as a different topic
+    (a new number, not a wrong old label) — under-matching is safe,
+    over-matching hides a genuinely new question."""
+    ta, tb = _question_topic_tokens(a), _question_topic_tokens(b)
+    shared_nums = {t for t in ta & tb if t.startswith("n:")}
+    shared_words = {t for t in ta & tb if t.startswith("w:")}
+    if shared_nums and shared_words:
+        return True
+    return len(shared_words) >= 2
+
+
+def _width_value_in_text(text):
+    """Width in mm stated next to width/폭 in free text."""
+    if not text:
+        return None
+    m = re.search(r"(width|폭)[^0-9]{0,25}([0-9]+(?:\.[0-9]+)?)",
+                  text, re.IGNORECASE)
+    if m:
+        try:
+            val = float(m.group(2))
+            return val if val > 0 else None
+        except ValueError:
+            return None
+    return None
+
+
+def derive_outline_width_mm(output_dir, answer_text=None):
+    """Outline real width in mm WITHOUT asking the user.
+
+    Order: (1) a width stated in the given answer text, (2) the
+    drawing's own front overall-width dimension from
+    dimensions.json (ask-first writes it, so a Continue build in
+    the same folder already has it). Only unambiguous candidates
+    count: a front-view dimension whose label names width, else
+    the unique largest horizontal front extent (height labels
+    excluded). An ambiguous list yields (None, None) — the caller
+    then asks the single width question instead of guessing a
+    scale. Returns (value, source-string) or (None, None).
+    """
+    w = _width_value_in_text(answer_text)
+    if w is not None:
+        return w, "answer text"
+    try:
+        dims = json.loads((Path(output_dir) / "dimensions.json")
+                          .read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+    if not isinstance(dims, list):
+        return None, None
+    front = [d for d in dims
+             if isinstance(d, dict)
+             and (d.get("view") or "").lower() == "front"
+             and not d.get("reference")
+             and isinstance(d.get("value"), (int, float))]
+    if not front:
+        return None, None
+
+    def _pick(cands):
+        if len(cands) == 1:
+            return float(cands[0]["value"])
+        vals = {float(d["value"]) for d in cands}
+        if len(vals) == 1:
+            return float(cands[0]["value"])
+        return None
+
+    overall = [d for d in front
+               if re.search(r"overall\s*width|전체\s*폭",
+                            d.get("label") or "", re.IGNORECASE)]
+    if overall:
+        val = _pick(overall)
+        if val is not None:
+            return val, ("dimensions.json "
+                         f"{overall[0].get('id', '')} "
+                         f"({overall[0].get('label', '')})")
+        return None, None
+    named = [d for d in front
+             if re.search(r"width|폭", d.get("label") or "",
+                          re.IGNORECASE)]
+    if named:
+        val = _pick(named)
+        if val is not None:
+            return val, ("dimensions.json "
+                         f"{named[0].get('id', '')} "
+                         f"({named[0].get('label', '')})")
+        return None, None
+    horiz = [d for d in front
+             if not re.search(r"height|높이|vertical|세로",
+                              d.get("label") or "", re.IGNORECASE)]
+    if not horiz:
+        return None, None
+    top = max(float(d["value"]) for d in horiz)
+    winners = [d for d in horiz if float(d["value"]) == top]
+    if len(winners) == 1:
+        return top, ("dimensions.json "
+                     f"{winners[0].get('id', '')} "
+                     f"({winners[0].get('label', '')})")
+    return None, None
+
+
+def requests_number(question_text):
+    """True when the question asks the user to SUPPLY a number —
+    the Q0 outline-width case ('give the outline real width in
+    mm'). A question that merely MENTIONS a dimension is not a
+    number request."""
+    text = question_text or ""
+    low = text.lower()
+    if re.search(r"(width|폭)[^0-9]{0,30}mm", text, re.IGNORECASE):
+        return True
+    return "give" in low and "mm" in low
+
+
+def parse_qa_history_pairs(qa_text):
+    """Parse qa_history.txt into [(qlabel, qtext, atext)] per round.
+
+    Rounds are 'Questions:' / 'Answers:' blocks; an answer pairs
+    with the same label from the most recent Questions block.
+    Pasted-question lines (answer == question text) are dropped.
+    """
+    hist_q, pairs = {}, []
+    mode, pending_q = None, {}
+    for line in (qa_text or "").splitlines():
+        s = line.strip()
+        if s == "Questions:":
+            mode, pending_q = "q", {}
+            continue
+        if s == "Answers:":
+            mode = "a"
+            continue
+        m = re.match(r"(Q\d+)\s*:\s*(.*)$", s)
+        if not m or not m.group(2).strip():
+            continue
+        label, txt = m.group(1), m.group(2).strip()
+        if mode == "q":
+            pending_q[label] = txt
+        elif mode == "a":
+            qtxt = pending_q.get(label, hist_q.get(label, ""))
+            if txt != qtxt:
+                pairs.append((label, qtxt, txt))
+            hist_q[label] = qtxt
+    return pairs
+
+
+_NOT_REFLECTED_NOTE = " [answered before, not yet reflected in the model]"
+
+
+def _split_premise(text):
+    """Split a macro question into (aspect, premise).
+
+    Macro questions read '<aspect> - built as <premise>'. The
+    premise describes what the artifact already embodies, so it
+    is reflection evidence; the aspect is what is still asked.
+    """
+    m = re.search(r"\bbuilt\b", text or "", re.IGNORECASE)
+    if not m:
+        return text or "", ""
+    return (text[:m.start()].strip(" -:,"), text[m.start():])
+
+
+def filter_build_questions(questions, qa_text, macro_text,
+                           answer_text=None):
+    """Reflection-first dedup for BUILD (macro-comment) questions.
+
+    Nov 1, 2026 user correction: a previous dedup hid questions
+    merely because qa_history held an answer, while the model
+    never reflected it — so the same questions kept coming back
+    under new labels. Order here is reflection FIRST, checked
+    AFTER the build/patch application step, against the
+    just-written macro — never a pre-application snapshot:
+    - A new question is dropped ONLY when a same-topic recorded
+      answer exists AND reflection is verified: an 'APPLIED'
+      marker for its label in macro_text, or the question's
+      aspect + premise tokens are fully covered by that answer
+      (the premise already states what was built, so the build
+      embodies the answer).
+    - When a same-topic answer exists but reflection is NOT
+      verified, the question STAYS, annotated so the user sees
+      WHY it came back instead of wondering.
+    - No same-topic answer: the question stays unchanged.
+    answer_text (this round's answers, not yet in qa_history)
+    is also considered, as (label, '', answer) pairs.
+    """
+    pairs = parse_qa_history_pairs(qa_text)
+    if answer_text:
+        for label, ans in parse_q_lines(answer_text).items():
+            if ans:
+                pairs.append((label, "", ans))
+    if not pairs or not questions:
+        return list(questions or [])
+    applied_labels = set(re.findall(r"(Q\d+)\s+APPLIED",
+                                    macro_text or ""))
+    kept = []
+    for label, text in questions:
+        match = None
+        for (alabel, aqtext, atext) in pairs:
+            if _same_topic(text, aqtext or atext):
+                match = (alabel, aqtext, atext)
+                break
+        if match is None:
+            kept.append((label, text))
+            continue
+        alabel, _aqtext, atext = match
+        aspect, premise = _split_premise(text)
+        aspect_toks = _question_topic_tokens(aspect)
+        premise_toks = _question_topic_tokens(premise)
+        atoks = _question_topic_tokens(atext)
+        # Coverage needs a real aspect (>= 2 distinctive tokens):
+        # a one-token aspect such as just "section" would otherwise
+        # be "covered" by any answer that merely mentions it.
+        covered = (len(aspect_toks) >= 2 and aspect_toks <= atoks
+                   and (not premise_toks or premise_toks <= atoks))
+        if alabel in applied_labels or covered:
+            continue  # dropped: answered AND reflected
+        txt = text
+        if len(txt) + len(_NOT_REFLECTED_NOTE) > 500:
+            txt = txt[:500 - len(_NOT_REFLECTED_NOTE) - 3].rstrip() + "..."
+        kept.append((label, txt + _NOT_REFLECTED_NOTE))
+    return kept
+
+
+def normalize_ask_questions(questions):
+    """Ask-first labels: keep Q0 (outline confirm), renumber the
+    rest sequentially in listed order. The LLM sometimes numbers
+    Q0, Q2..Q5 (Q1 gap), which later reads as a different set."""
+    out, n = [], 1
+    for label, text in (questions or []):
+        if label == "Q0":
+            out.append(("Q0", text))
+        else:
+            out.append((f"Q{n}", text))
+            n += 1
+    return out
+
+
+def stabilize_question_ids(new_questions, existing_questions):
+    """Keep stable labels across attempts (Nov 1, 2026 user rule).
+
+    A new question matching an existing pending question by topic
+    keeps the existing label; only genuinely new topics get fresh
+    numbers (max + 1). Without this, every attempt renumbers
+    Q1..Qn from scratch and the user reads a fresh list as new
+    questions. Matching is conservative (see _same_topic): a weak
+    match gets a new number rather than a wrong old label."""
+    existing = list(existing_questions or [])
+    used = {label for label, _ in existing}
+    next_n = 1
+    for label in used:
+        try:
+            next_n = max(next_n, int(label[1:]) + 1)
+        except ValueError:
+            pass
+    claimed, out = set(), []
+    for _label, text in new_questions:
+        hit = None
+        for elabel, etext in existing:
+            if elabel not in claimed and _same_topic(text, etext):
+                hit = elabel
+                break
+        if hit is not None:
+            claimed.add(hit)
+            out.append((hit, text))
+        else:
+            while f"Q{next_n}" in used:
+                next_n += 1
+            nl = f"Q{next_n}"
+            used.add(nl)
+            next_n += 1
+            out.append((nl, text))
+    return out
+
+
+_SOLVER_LINE_RES = (r"conflicting constraints", r"WIRE .* error",
+                    r"FAIL feature=",
+                    r"Sketch with conflicting constraints")
+
+
+def extract_exact_failure_lines(log_text):
+    """Verbatim solver/wire lines from a freecadcmd log (Nov 1,
+    2026 user rule: the next prompt gets exact lines, not only a
+    generic hypothesis). Index lines following a 'conflicting
+    constraints' line (', 5, 8' style) are captured with it."""
+    lines = (log_text or "").splitlines()
+    out = []
+    for i, ln in enumerate(lines):
+        if any(re.search(p, ln, re.IGNORECASE)
+               for p in _SOLVER_LINE_RES):
+            out.append(ln.strip()[:300])
+            for nxt in lines[i + 1:i + 3]:
+                if re.match(r"\s*,?\s*\d+(\s*,\s*\d+)*\s*$",
+                            nxt.strip()):
+                    out.append(nxt.strip()[:100])
+                else:
+                    break
+    seen, res = set(), []
+    for ln in out:
+        if ln and ln not in seen:
+            seen.add(ln)
+            res.append(ln)
+    return "\n".join(res)[:1500]
+
+
 def run_freecadcmd(freecadcmd, macro_path, log_path):
     with open(log_path, "w", encoding="utf-8") as log_file:
         result = subprocess.run(
@@ -1170,12 +1521,19 @@ def build_diagnosis(run_log_text="", verification=None, last_error="",
     else:
         cause = ("unclear from log + verification - no single cause "
                  "category matched; full reference set attached")
+    # Exact solver/wire lines, verbatim (Nov 1, 2026 user rule):
+    # the next prompt must see the conflicting-constraint indices
+    # and the wire error itself, not only the generic hypothesis
+    # below. The hypothesis stays, but AFTER the exact lines.
+    solver_lines = extract_exact_failure_lines(log_text)
     report = (
         "Diagnosis (from actual artifact, not error message alone):\n"
         f"- Feature: {feature}\n"
         f"- Geometry index: {geometry_index}\n"
         f"- Exact error: {exact_error}\n"
-        f"- Gap size vs tolerance: {gap}\n"
+        + (f"- Solver/wire lines (verbatim from log):\n"
+           f"{solver_lines}\n" if solver_lines else "")
+        + f"- Gap size vs tolerance: {gap}\n"
         f"- Cause hypothesis: {cause}\n"
         + (f"- {fcstd_note}\n" if fcstd_note else "")
         + f"- Category: {category or 'unclear -> full set'}"
@@ -1183,7 +1541,7 @@ def build_diagnosis(run_log_text="", verification=None, last_error="",
     return {"feature": feature, "geometry_index": geometry_index,
             "exact_error": exact_error, "gap": gap,
             "cause_hypothesis": cause, "category": category,
-            "report": report}
+            "solver_lines": solver_lines, "report": report}
 
 
 def load_reference_texts(categories, script_dir=None):
@@ -4505,6 +4863,18 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
         _log("PATCH FAIL: no modification instructions given.")
         return _finish(1)
     macro_text = macro_path.read_text(encoding="utf-8", errors="replace")
+    # Outline width auto-derivation on patch (Nov 1, 2026 user
+    # rule): the program derives the width itself — from this
+    # answer text, else from the drawing's front overall-width
+    # dimension — instead of requiring the user to type it into
+    # the width field when the drawing already gives it.
+    if outline_width_mm is None and not (
+            output_dir / "outline_points.json").is_file():
+        _dw, _dw_src = derive_outline_width_mm(output_dir, text)
+        if _dw is not None:
+            outline_width_mm = _dw
+            _log(f"PATCH: outline width auto-derived ({_dw} mm from "
+                 f"{_dw_src}); tracing before patch")
     # Outline trace on patch (Nov 1, 2026 user rule): a patch
     # prompt carries traced points only when outline_points.json
     # exists. If the folder has an outline image but no points
@@ -4575,6 +4945,21 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
     answered_labels = ((answered_from_instructions
                         | answered_from_history)
                        & set(question_dict))
+    # Numeric-completeness (Nov 1, 2026 user rule): an answer to
+    # a question that asks the user to SUPPLY a number (Q0 width)
+    # but contains no digit does not count as answering that
+    # question — the question stays pending instead of being
+    # pruned as "answered". This never blocks the patch itself
+    # (the width is still auto-derived above when possible); it
+    # only keeps the question visible until a real number arrives.
+    if answered_labels:
+        _cur_ans = parse_q_lines(cleaned_text)
+        for _lbl, _q, _a in parse_qa_history_pairs(qa_text):
+            _cur_ans.setdefault(_lbl, _a)
+        answered_labels = {
+            lbl for lbl in answered_labels
+            if not (requests_number(question_dict.get(lbl, ""))
+                    and not re.search(r"\d", _cur_ans.get(lbl, "")))}
     if answered_labels and not dry_run and questions_path.is_file():
         try:
             _qlines = questions_path.read_text(
@@ -5237,6 +5622,60 @@ def main(argv=None):
             report_lines.append(
                 f"Outline trace: skipped ({exc}); continuing with "
                 "the outline image only.")
+    # Outline-width auto-derivation (Nov 1, 2026 user rule): when
+    # an outline image exists but no traced points yet, the program
+    # derives the width itself — from the answer/instruction text,
+    # else from the drawing's own front overall-width dimension —
+    # and traces NOW, so the build prompt carries points. The user
+    # is never told to type the width by hand when the drawing
+    # already gives it.
+    if outline_image is not None and outline_points_data is None:
+        _dw, _dw_src = derive_outline_width_mm(output_dir, args.text)
+        if _dw is not None:
+            try:
+                if run_trace_outline_mode(output_dir, args.freecadcmd,
+                                          outline_path, _dw) == 0:
+                    outline_points_data = load_outline_points(output_dir)
+                    report_lines.append(
+                        f"Outline width auto-derived ({_dw} mm from "
+                        f"{_dw_src}); traced to outline_points.json")
+                else:
+                    report_lines.append(
+                        "Outline trace: auto-derived width FAILED "
+                        "(see trace_log.txt); continuing image-only.")
+            except Exception as exc:
+                report_lines.append(
+                    f"Outline trace: skipped ({exc}); continuing "
+                    "with the outline image only.")
+    # Trace gate (Nov 1, 2026 user rule): with an outline image
+    # and still no traced points, do NOT start a build on
+    # provisional rectangles. Stop with the single width question
+    # instead — no API credit is spent on a build whose primary
+    # shape source is missing. Ask-first and dry-run are exempt:
+    # ask-first produces the dimensions the derivation needs, and
+    # a missing freecadcmd is reported by its own check below.
+    _fc_ok = (shutil.which(args.freecadcmd) is not None
+              or Path(args.freecadcmd).is_file())
+    if (outline_image is not None and outline_points_data is None
+            and not args.ask_first and not args.dry_run and _fc_ok):
+        write_questions(output_dir, [(
+            "Q0", "Outline real width in mm is needed to trace the "
+                  "outline to exact points (it could not be derived "
+                  "from the drawing dimensions). Give the width in "
+                  "mm.")])
+        (output_dir / "guidance.txt").write_text(
+            "OUTLINE WIDTH NEEDED: an outline image is attached but "
+            "no traced points exist and no width could be derived "
+            "from the drawing dimensions. The build was NOT started, "
+            "so no provisional rectangle was built. Answer Q0 with "
+            "the width in mm and continue; the patch traces first.\n",
+            encoding="utf-8")
+        report_lines.append(
+            "RESULT: OUTLINE WIDTH NEEDED (build not started, "
+            "single Q0 width question, no API build call)")
+        write_report(output_dir / "report.txt", report_lines)
+        print("\n".join(report_lines))
+        return 1
     _points_text = format_outline_points_text(outline_points_data)
     if _points_text:
         outline_text = (outline_text + "\n\n" + _points_text
@@ -5371,7 +5810,7 @@ def main(argv=None):
                 _vm_path.unlink()
         except OSError:
             pass
-        questions = extract_questions(content, "")
+        questions = normalize_ask_questions(extract_questions(content, ""))
         # Numbered dimensions: D1... with approximate positions,
         # saved for the web UI matching tab (numbered drawing +
         # table). Positions are LLM estimates, not measurements.
@@ -5577,6 +6016,30 @@ def main(argv=None):
         # A macro that invents provisional values while asking Q1-Q9
         # must not later read as a clean PASS.
         questions = extract_questions(content, macro_text)
+        # Reflection-first dedup + stable IDs (Nov 1, 2026 user
+        # rules): drop only answered-AND-reflected build
+        # questions (see filter_build_questions); keep
+        # unreflected ones annotated; keep labels stable across
+        # attempts (see stabilize_question_ids) instead of
+        # renumbering Q1..Qn from scratch each attempt.
+        _qa_text = ""
+        try:
+            _qa_text = (output_dir / "qa_history.txt").read_text(
+                encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+        _existing_q = {}
+        try:
+            _existing_q = parse_q_lines(
+                (output_dir / "questions.txt").read_text(
+                    encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+        questions = filter_build_questions(
+            questions, _qa_text, macro_text, answer_text=args.text)
+        questions = stabilize_question_ids(
+            questions, sorted(_existing_q.items(),
+                              key=lambda kv: int(kv[0][1:])))
         # write_questions() validates AND deletes any stale
         # questions.txt when this attempt asked nothing, so a
         # clean final attempt can never inherit an earlier
