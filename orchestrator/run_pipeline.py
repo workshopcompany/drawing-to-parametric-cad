@@ -2349,6 +2349,16 @@ def run_measure_mode(output_dir, freecadcmd):
     measurements_path.write_text(
         json.dumps(measurements, indent=1, ensure_ascii=False),
         encoding="utf-8")
+    # Bootstrap (Nov 1, 2026): Measure used to write an empty
+    # matching.json when the folder had no table, so the tab
+    # stayed empty even though measurement ran. If no D-rows
+    # exist yet, build the table first (from dimensions.json),
+    # so the measured values below have rows to fill.
+    if not _matching_has_d_rows(output_dir):
+        try:
+            ensure_matching_file(output_dir, freecadcmd)
+        except Exception:
+            pass
     matching_path = output_dir / "matching.json"
     rows = []
     if matching_path.is_file():
@@ -3334,6 +3344,268 @@ def answered_labels_from_qa_history(qa_text, question_dict):
     return set(answers)
 
 
+def _dims_file_to_text(output_dir):
+    """D-lines text for build_matching, from dimensions.json first,
+    else from existing matching.json D-rows. Empty when neither
+    source exists — build_matching then still yields the always
+    rows, so a matching file can exist even without a D source."""
+    dims_path = output_dir / "dimensions.json"
+    if dims_path.is_file():
+        try:
+            dims = json.loads(dims_path.read_text(encoding="utf-8"))
+        except Exception:
+            dims = []
+        lines = []
+        for d in dims:
+            if not isinstance(d, dict) or d.get("id") is None:
+                continue
+            val = d.get("value")
+            if val is None:
+                continue
+            val_txt = f"({val})" if d.get("reference") else f"{val}"
+            view_txt = f" [{d['view']}]" if d.get("view") else ""
+            lines.append(f"{d['id']}: {d.get('label', '')} = "
+                         f"{val_txt} mm{view_txt}")
+        if lines:
+            return "\n".join(lines)
+    matching_path = output_dir / "matching.json"
+    if matching_path.is_file():
+        try:
+            rows = json.loads(matching_path.read_text(encoding="utf-8"))
+        except Exception:
+            rows = []
+        lines = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            no = str(r.get("no", ""))
+            if not re.match(r"D\d+$", no):
+                continue
+            val = r.get("drawing")
+            if val is None:
+                continue
+            lines.append(f"{no}: {r.get('item', '')} = {val} mm")
+        return "\n".join(lines)
+    return ""
+
+
+def _matching_has_d_rows(output_dir):
+    matching_path = output_dir / "matching.json"
+    if not matching_path.is_file():
+        return False
+    try:
+        rows = json.loads(matching_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return any(isinstance(r, dict)
+               and re.match(r"D\d+$", str(r.get("no", "")))
+               for r in rows)
+
+
+def ensure_matching_file(output_dir, freecadcmd, macro_text=None,
+                         verification=None, features=None):
+    """Guarantee matching.json exists, with D-rows when a D source
+    exists (Nov 1, 2026 user rule: the table JSON must keep
+    existing, even on failure).
+
+    Only builds when the file is missing or has no D-rows — an
+    existing table (including its measured columns, which
+    build_matching does not produce) is NEVER overwritten by
+    this helper. Sources: dimensions.json (or old matching rows)
+    for D-lines, macro.py FEATURE_MAP (or mapping.json) for the
+    map, the STEP verification and the .fcstd feature dump for
+    modeling values. On any build error, a minimal file with the
+    always rows (or a single unavailable row) is still written,
+    so the tab never has to say "no matching table" for a folder
+    that has a model. Returns the row count written (0 only when
+    even the minimal write failed).
+    """
+    if _matching_has_d_rows(output_dir):
+        return -1
+    try:
+        if macro_text is None:
+            macro_path = output_dir / "macro.py"
+            macro_text = (macro_path.read_text(encoding="utf-8",
+                                               errors="replace")
+                          if macro_path.is_file() else "")
+        mapping = None
+        mapping_path = output_dir / "mapping.json"
+        if mapping_path.is_file():
+            try:
+                mapping = json.loads(
+                    mapping_path.read_text(encoding="utf-8"))
+            except Exception:
+                mapping = None
+        if mapping is None:
+            mapping, _warn = extract_feature_map(macro_text or "")
+        if verification is None:
+            step_path = output_dir / "model.step"
+            if step_path.is_file():
+                try:
+                    verification = verify_step(freecadcmd, step_path,
+                                               output_dir)
+                except Exception:
+                    verification = {}
+            else:
+                verification = {}
+        if features is None:
+            features_path = output_dir / "features.json"
+            if features_path.is_file():
+                try:
+                    features = json.loads(
+                        features_path.read_text(encoding="utf-8"))
+                except Exception:
+                    features = None
+            elif (output_dir / "model.fcstd").is_file():
+                try:
+                    features = run_read_features(
+                        freecadcmd, output_dir / "model.fcstd",
+                        output_dir)
+                except Exception:
+                    features = None
+        d_text = _dims_file_to_text(output_dir)
+        rows = build_matching(verification or {}, macro_text or "",
+                              d_text, mapping=mapping,
+                              features=features)
+        old_path = output_dir / "matching.json"
+        if old_path.is_file():
+            try:
+                shutil.copyfile(old_path,
+                                output_dir / "matching.prev.json")
+            except OSError:
+                pass
+        old_path.write_text(json.dumps(rows, indent=2,
+                                       ensure_ascii=False),
+                            encoding="utf-8")
+        return len(rows)
+    except Exception:
+        try:
+            (output_dir / "matching.json").write_text(
+                json.dumps([{"no": "—", "item": "Matching unavailable",
+                             "drawing": None, "modeling": None,
+                             "result": "?"}], indent=2,
+                           ensure_ascii=False), encoding="utf-8")
+            return 1
+        except OSError:
+            return 0
+
+
+def run_build_table_mode(output_dir, freecadcmd):
+    """Build (or rebuild) matching.json without rebuilding the
+    model — the web matching tab's "표 만들기" button.
+
+    No API call, no macro/model change, no report change. D-rows
+    come from dimensions.json (or existing matching rows); the
+    FEATURE_MAP comes from mapping.json or macro.py; modeling
+    values come from the current .fcstd dump + STEP verification.
+    Measured columns from a previous table are preserved by
+    D-number. Fails clearly when there is no D source at all;
+    even then ensure_matching_file leaves at least a minimal
+    matching.json behind, so the tab is never empty for a
+    missing-file reason.
+    """
+    log_lines = []
+
+    def _log(msg):
+        log_lines.append(msg)
+        print(msg)
+
+    def _finish(code):
+        (output_dir / "table_log.txt").write_text(
+            "\n".join(log_lines) + "\n", encoding="utf-8")
+        return code
+
+    old_rows = []
+    matching_path = output_dir / "matching.json"
+    if matching_path.is_file():
+        try:
+            old_rows = json.loads(
+                matching_path.read_text(encoding="utf-8"))
+        except Exception:
+            old_rows = []
+    measured_by_no = {}
+    for r in old_rows:
+        if isinstance(r, dict) and r.get("measured") is not None:
+            measured_by_no[str(r.get("no", ""))] = {
+                "measured": r.get("measured"),
+                "measured_method": r.get("measured_method"),
+                "measured_result": r.get("measured_result"),
+            }
+    d_text = _dims_file_to_text(output_dir)
+    if not d_text.strip():
+        _log("TABLE FAIL: no D source (dimensions.json or matching "
+             "D-rows) in this folder, so no D table can be built.")
+        ensure_matching_file(output_dir, freecadcmd)
+        return _finish(1)
+    macro_path = output_dir / "macro.py"
+    macro_text = (macro_path.read_text(encoding="utf-8",
+                                       errors="replace")
+                  if macro_path.is_file() else "")
+    mapping = None
+    mapping_path = output_dir / "mapping.json"
+    if mapping_path.is_file():
+        try:
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+        except Exception:
+            mapping = None
+    if mapping is None:
+        mapping, _warn = extract_feature_map(macro_text)
+    verification = {}
+    step_path = output_dir / "model.step"
+    if step_path.is_file():
+        try:
+            verification = verify_step(freecadcmd, step_path, output_dir)
+        except Exception:
+            verification = {}
+    features = None
+    features_path = output_dir / "features.json"
+    if features_path.is_file():
+        try:
+            features = json.loads(features_path.read_text(encoding="utf-8"))
+        except Exception:
+            features = None
+    elif (output_dir / "model.fcstd").is_file():
+        try:
+            features = run_read_features(freecadcmd,
+                                         output_dir / "model.fcstd",
+                                         output_dir)
+        except Exception:
+            features = None
+    try:
+        rows = build_matching(verification, macro_text, d_text,
+                              mapping=mapping, features=features)
+    except Exception as exc:
+        _log(f"TABLE FAIL: build_matching failed: {exc}")
+        ensure_matching_file(output_dir, freecadcmd)
+        return _finish(1)
+    d_rows = [r for r in rows
+              if isinstance(r, dict)
+              and re.match(r"D\d+$", str(r.get("no", "")))]
+    if not d_rows:
+        _log("TABLE FAIL: build produced no D-rows.")
+        ensure_matching_file(output_dir, freecadcmd)
+        return _finish(1)
+    preserved = 0
+    for r in d_rows:
+        saved = measured_by_no.get(str(r.get("no", "")))
+        if saved:
+            r.update(saved)
+            preserved += 1
+    if matching_path.is_file():
+        try:
+            shutil.copyfile(matching_path,
+                            output_dir / "matching_before_table.json")
+        except OSError:
+            pass
+    matching_path.write_text(json.dumps(rows, indent=2,
+                                        ensure_ascii=False),
+                             encoding="utf-8")
+    _log(f"TABLE OK: matching.json built ({len(d_rows)} D-rows, "
+         f"{preserved} measured column(s) preserved). Model, macro, "
+         f"and report unchanged.")
+    return _finish(0)
+
+
 def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
                      dry_run):
     """Suggest DRAFT answers for questions.txt — nothing else.
@@ -3826,6 +4098,17 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                              f"({r['reason']})" for r in _failed)
                  + ". Patch again with only those features changed; "
                  "no auto-retry is run in patch mode.")
+            # Table JSON keeps existing even on a gate failure:
+            # the failed model's values are still worth showing.
+            try:
+                _n = ensure_matching_file(
+                    output_dir, freecadcmd, macro_text=new_text,
+                    verification=verification)
+                if _n > 0:
+                    _log(f"PATCH: matching.json ensured ({_n} rows, "
+                         f"even on failure)")
+            except Exception:
+                pass
             return _finish(1)
     # Fresh previews + feature tree after a patch, best-effort:
     # the result page must show the PATCHED model, not stale
@@ -3843,6 +4126,16 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
     # Answered questions were already removed from questions.txt
     # BEFORE the patch ran (see above), so nothing is left to
     # clean up here on success; unanswered questions stay.
+    # Point 2 (Nov 1, 2026 user rule): a successful patch must
+    # not leave the table missing — build it if it is absent.
+    try:
+        _n = ensure_matching_file(output_dir, freecadcmd,
+                                  macro_text=new_text,
+                                  verification=verification)
+        if _n > 0:
+            _log(f"PATCH: matching.json ensured ({_n} rows)")
+    except Exception:
+        pass
     report_lines = [
         "Drawing-to-Parametric-CAD orchestrator v0.1",
         "PATCH MODE: existing macro.py patched in place, 1 API call, "
@@ -3950,6 +4243,15 @@ def parse_args(argv=None):
                         "applied until the user edits + confirms it "
                         "via /answer. With --dry-run it writes "
                         "suggest_prompt.txt and calls no API.")
+    parser.add_argument("--build-table", action="store_true",
+                        help="Build (or rebuild) matching.json without "
+                        "rebuilding the model (web matching tab's "
+                        "\"표 만들기\" button): D-rows from "
+                        "dimensions.json, FEATURE_MAP from "
+                        "mapping.json or macro.py, modeling values "
+                        "from the current .fcstd + STEP. No API "
+                        "call, no macro/model/report change; "
+                        "measured columns are preserved by D-number.")
     parser.add_argument("--patch", action="store_true",
                         help="Patch an existing result folder's macro.py "
                         "in place instead of regenerating it: one "
@@ -3989,6 +4291,8 @@ def main(argv=None):
     if args.remap:
         return run_remap_mode(output_dir, args.freecadcmd, args.model,
                               args.max_tokens, args.dry_run)
+    if args.build_table:
+        return run_build_table_mode(output_dir, args.freecadcmd)
     if args.suggest:
         _drawing = Path(args.drawing) if args.drawing else None
         return run_suggest_mode(output_dir, _drawing, args.model,
@@ -3999,7 +4303,7 @@ def main(argv=None):
     if args.images:
         return run_images_mode(output_dir, args.freecadcmd)
     if not args.drawing:
-        die("--drawing is required unless --measure, --inspect, --remap, --patch, --images, or --suggest is given.")
+        die("--drawing is required unless --measure, --inspect, --remap, --patch, --images, --suggest, or --build-table is given.")
     report_lines = ["Drawing-to-Parametric-CAD orchestrator v0.1"]
     self_fix_log = output_dir / "self_fix_log.txt"
     if self_fix_log.exists():
@@ -4558,6 +4862,21 @@ def main(argv=None):
                     f"{method_txt}")
         except Exception as exc:
             report_lines.append(f"Matching: unavailable ({exc})")
+        # Point 2 (Nov 1, 2026 user rule): a later successful
+        # build must not leave the table missing. If the block
+        # above did not leave D-rows (exception, no map, no
+        # D source in --text), build them from dimensions.json
+        # / old rows instead of leaving matching.json absent.
+        if not _matching_has_d_rows(output_dir):
+            try:
+                _n = ensure_matching_file(
+                    output_dir, args.freecadcmd, macro_text=macro_text,
+                    verification=verification, features=features_data)
+                if _n > 0:
+                    report_lines.append(
+                        f"Matching: matching.json ensured ({_n} rows)")
+            except Exception:
+                pass
         if questions:
             # Still exit 0 (a valid solid was built and its files
             # are kept), but this is NOT a success: provisional
@@ -4594,6 +4913,18 @@ def main(argv=None):
         "ambiguous dimension. Do not retry without that fix/answer.\n"
     )
     (output_dir / "guidance.txt").write_text(guidance, encoding="utf-8")
+    # Point 1 (Nov 1, 2026 user rule): the table JSON must keep
+    # existing, even on failure. A failed build still leaves a
+    # matching.json (D-rows with ? where unknown) so the tab is
+    # never empty for a missing-file reason.
+    try:
+        _n = ensure_matching_file(output_dir, args.freecadcmd)
+        if _n > 0:
+            report_lines.append(
+                f"Matching: matching.json ensured ({_n} rows, "
+                f"even on failure)")
+    except Exception:
+        pass
     report_lines.append("RESULT: FAIL - 4th failure, see guidance.txt")
     write_report(output_dir / "report.txt", report_lines)
     print(guidance)

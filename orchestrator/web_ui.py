@@ -312,6 +312,27 @@ S = {
                          "매핑 다시 채우기에 실패했습니다. 폴더의 "
                          "remap_log.txt를 보세요. 모델은 바뀌지 "
                          "않았습니다."),
+    "build_table_btn": ("Create table", "표 만들기"),
+    "build_table_note": ("Builds the matching table from the current "
+                         "folder (D-rows from dimensions.json, "
+                         "FEATURE_MAP from mapping.json or macro.py, "
+                         "modeling values from the current .fcstd + "
+                         "STEP). No API call, no rebuild, model, "
+                         "macro, and report unchanged. Measured "
+                         "columns from an old table are kept. "
+                         "Use it when the table is missing.",
+                         "현재 폴더에서 매칭표를 만듭니다 (D행은 "
+                         "dimensions.json에서, FEATURE_MAP은 "
+                         "mapping.json이나 macro.py에서, Modeling "
+                         "값은 현재 .fcstd + STEP에서 가져옵니다). "
+                         "API 호출 없음, 다시 만들기 없음, 모델·"
+                         "매크로·보고서는 바뀌지 않습니다. 예전 표의 "
+                         "실측 열은 유지됩니다. 표가 없을 때 쓰세요."),
+    "err_build_table_failed": ("Table creation failed. See table_log.txt "
+                               "in the folder. The model was not changed.",
+                               "표 만들기에 실패했습니다. 폴더의 "
+                               "table_log.txt를 보세요. 모델은 바뀌지 "
+                               "않았습니다."),
     "inspect_history_title": ("Feature-check history", "특징 검사 이력"),
     "err_inspect_failed": ("Feature check failed. See web_ui_inspect.log "
                            "in the folder.",
@@ -339,11 +360,12 @@ S = {
                            "이 폴더에 매칭표가 없습니다."),
     "err_export_format": ("Unknown format.",
                           "알 수 없는 형식입니다."),
-    "matching_none": ("No matching table in this result (older run). "
-                      "Solids, validity, volume, and bbox are in "
-                      "report.txt.",
-                      "이 결과에는 매칭표가 없습니다 (예전 실행). 솔리드, "
-                      "유효성, 부피, bbox는 report.txt에 있습니다."),
+    "matching_none": ("No matching table in this result. Solids, "
+                      "validity, volume, and bbox are in report.txt. "
+                      "Press \"Create table\" below to build it.",
+                      "이 결과에는 매칭표가 없습니다. 솔리드, 유효성, "
+                      "부피, bbox는 report.txt에 있습니다. 아래 "
+                      "\"표 만들기\"를 눌러 만드세요."),
     "askfirst_banner": ("⏳ Ask-first done — no model yet, press "
                         "Continue work to build",
                         "⏳ 질문 먼저 완료 — 아직 모델이 없습니다, "
@@ -1892,6 +1914,25 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
             f"{tr(lang, 'remap_btn')}</button></form>"
             f"<p class=\"note\">{tr(lang, 'remap_note')}</p>")
 
+    # Build-table button: creates matching.json without rebuilding
+    # (no API call). Shown even when no table exists — that is
+    # exactly the case it fixes — as long as the folder has a
+    # model or a dimensions list to build from.
+    build_table_block = ""
+    if ((output_dir / "model.fcstd").is_file()
+            or (output_dir / "dimensions.json").is_file()
+            or (output_dir / "matching.json").is_file()):
+        build_table_block = (
+            f"<form action=\"/build-table\" method=\"post\" "
+            f"enctype=\"multipart/form-data\">"
+            f"<input type=\"hidden\" name=\"dir\" value=\"{html.escape(str(output_dir))}\">"
+            f"<input type=\"hidden\" name=\"lang\" value=\"{lang}\">"
+            f"<label>freecadcmd <input type=\"text\" name=\"freecadcmd\" "
+            f"value=\"freecadcmd\"></label> "
+            f"<button class=\"btn\" type=\"submit\">"
+            f"{tr(lang, 'build_table_btn')}</button></form>"
+            f"<p class=\"note\">{tr(lang, 'build_table_note')}</p>")
+
     measure_block = ""
     step_path = output_dir / "model.step"
     if step_path.is_file():
@@ -2066,6 +2107,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en"):
       <div class="card"><h3>&#10003; {tr(lang, 'matching_title')}</h3>
       <p class="note">{tr(lang, 'matching_note')}</p>
       {export_open}{matching_table}{export_close}
+      {build_table_block}
       {measure_block}
       {inspect_block}
       {inspect_card}
@@ -2264,7 +2306,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest", "/build-table"):
             self.send_error(404, "Not found")
             return
         try:
@@ -2322,6 +2364,43 @@ class Handler(BaseHTTPRequestHandler):
                     timeout=3600, env=measure_env)
             if result.returncode != 0:
                 data = error_page(tr(lang, "err_measure_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/build-table":
+            # Build the matching table: no API call, no rebuild.
+            # Runs run_pipeline.py --build-table on the folder,
+            # then shows the result page with the new table.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--build-table",
+                       "--output-dir", str(output_dir),
+                       "--freecadcmd", freecadcmd_value]
+            log_path = output_dir / "web_ui_build_table.log"
+            bt_env = dict(os.environ)
+            bt_env["PYTHONUTF8"] = "1"
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=bt_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_build_table_failed"),
+                                  lang=lang)
                 self._send_html(400, data)
                 return
             data = result_page(output_dir, 0, lang=lang)
