@@ -186,6 +186,7 @@
       .tag.none{background:color-mix(in srgb,var(--snap) 14%, transparent); color:var(--snap)}
       .tag.far{background:transparent; border:1px solid var(--warn); color:var(--warn); padding:0 6px}
       .tag.traced{background:color-mix(in srgb,#7c3aed 16%, transparent); color:#7c3aed}
+      .tag.smooth{background:color-mix(in srgb,#0e7c6b 16%, transparent); color:#0e7c6b}
       #loupe{position:fixed; width:220px; height:220px; border:2px solid #191d21; border-radius:12px; overflow:hidden; background:#fff; box-shadow:0 8px 24px rgba(0,0,0,.25); pointer-events:none; z-index:60; display:none}
       #loupe canvas{width:220px; height:220px; display:block}
       .rowdel{border:0; background:none; color:var(--ink-2); font-size:15px; padding:0 2px; line-height:1}
@@ -301,6 +302,14 @@
               <small>수동으로 옮긴 점도 놓는 위치 근처의 선에 다시 붙입니다. 끄면 옮긴 자리가 그대로 확정됩니다.</small></label>
             <button class="btn" id="btnTraceAlong" style="margin-top:10px">선 따라 보정</button>
             <div class="hint" id="traceAlongStatus">스냅된 점들 사이 구간을 도면 선을 따라 보정합니다. 선을 찾지 못한 구간은 직선으로 남습니다.</div>
+            <div class="row" style="margin-top:10px">
+              <label for="smoothFrom">곡선 연결</label>
+              <input type="number" id="smoothFrom" min="1" step="1" placeholder="시작 점" style="width:74px" />
+              <span>~</span>
+              <input type="number" id="smoothTo" min="1" step="1" placeholder="끝 점" style="width:74px" />
+              <button class="btn" id="btnSmooth">곡선으로 연결</button>
+            </div>
+            <div class="hint" id="smoothStatus">시작~끝 점 사이 구간을 곡선(Catmull-Rom)으로 연결해 중간점을 채웁니다. 점 번호는 화면의 # 번호이며, 곡선은 양 끝점을 그대로 지납니다.</div>
             <div class="hint">
               <b>점 편집</b> — 스냅된 점을 드래그해 고치고, 선 위를 <b>더블클릭</b>하면 그 자리에 점이 추가됩니다.
               점을 <b>우클릭</b>하거나 목록에서 ✕를 누르면 삭제, <span class="kbd">Ctrl</span>+<span class="kbd">Z</span>는 실행취소입니다.
@@ -1166,7 +1175,7 @@
         });
         /* points */
         pts.forEach(function(p, i){
-          if (p.via !== "traced"){
+          if (p.via !== "traced" && p.via !== "smooth"){
             ctx.fillStyle = "rgba(37,99,235,.9)";
             ctx.beginPath(); ctx.arc(p.rx, p.ry, 3.2 * inv, 0, Math.PI * 2); ctx.fill();
           }
@@ -1177,12 +1186,12 @@
             ctx.setLineDash([4 * inv, 3 * inv]); ctx.stroke(); ctx.setLineDash([]);
           }
           var sel = i === S.selected;
-          if (p.via === "traced"){
-            /* traced intermediate: purple diamond, distinct from user clicks */
+          if (p.via === "traced" || p.via === "smooth"){
+            /* computed intermediate: purple diamond (traced) or teal diamond (smoothed), distinct from user clicks */
             ctx.beginPath();
             ctx.moveTo(p.sx, p.sy - 5 * inv); ctx.lineTo(p.sx + 5 * inv, p.sy);
             ctx.lineTo(p.sx, p.sy + 5 * inv); ctx.lineTo(p.sx - 5 * inv, p.sy); ctx.closePath();
-            ctx.fillStyle = "#7c3aed"; ctx.fill();
+            ctx.fillStyle = (p.via === "smooth") ? "#0e7c6b" : "#7c3aed"; ctx.fill();
             ctx.strokeStyle = sel ? "#191d21" : "#ffffff"; ctx.lineWidth = (sel ? 2 : 1.4) * inv; ctx.stroke();
           } else {
             ctx.beginPath(); ctx.arc(p.sx, p.sy, (sel ? 7 : 5) * inv, 0, Math.PI * 2);
@@ -1253,7 +1262,7 @@
         return "<tr data-i='" + i + "'" + (i === S.selected ? " class='sel'" : "") + ">" +
           "<td>" + (i + 1) + "</td><td>" + (p.seq || (i + 1)) + "</td><td>" + fmt(p.sx, 0) + "</td><td>" + fmt(p.sy, 0) + "</td>" +
           "<td>" + (mm ? fmt(mm.x, 3) : "—") + "</td><td>" + (mm ? fmt(mm.y, 3) : "—") + "</td>" +
-          "<td class='st'>" + statusTag(p.status) + (p.via === "traced" ? " <span class='tag traced'>추적</span>" : "") + (isFar(p) ? " <span class='tag far'>반경 초과 " + Math.round(p.dist) + "px</span>" : "") + "</td>" +
+          "<td class='st'>" + statusTag(p.status) + (p.via === "traced" ? " <span class='tag traced'>추적</span>" : (p.via === "smooth" ? " <span class='tag smooth'>부드럽게</span>" : "")) + (isFar(p) ? " <span class='tag far'>반경 초과 " + Math.round(p.dist) + "px</span>" : "") + "</td>" +
           "<td><button class='rowdel' data-del='" + i + "' title='점 삭제' aria-label='점 " + (i + 1) + " 삭제'>✕</button></td></tr>";
       }).join("");
     }
@@ -2274,6 +2283,71 @@
         (skippedNoPath ? " (선 없음/너무 김 " + skippedNoPath + "개)" : "") + ". 실행취소로 되돌릴 수 있습니다.");
     }
     $("btnTraceAlong").addEventListener("click", traceAlongLines);
+
+    /* ================= smooth curve between points =================
+       Connect a chosen range of points with a smooth curve: a Catmull-Rom
+       spline through the range's anchors (it passes exactly through every
+       anchor, so the shape stays faithful and only the chords between
+       anchors become curved). Like traceAlongLines, this inserts ordinary
+       S.points entries (via:'smooth', teal diamonds on canvas, '부드럽게'
+       tag in the table, added_via:'smooth' in export) as one undo step.
+       Tangents come from the neighbouring points in the full polyline
+       (wrapping around for a closed outline), so even a single segment
+       gets a genuine curve. Point numbers are the 1-based # labels. */
+    function catmullRom(p0, p1, p2, p3, t){
+      var t2 = t * t, t3 = t2 * t;
+      return {
+        x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+        y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)
+      };
+    }
+    function smoothRange(){
+      var statusEl = $("smoothStatus");
+      function report(msg){ if (statusEl) statusEl.textContent = msg; toast(msg); }
+      var pts = S.points;
+      if (!pts.length){ report("먼저 점을 찍으세요."); return; }
+      var s = parseInt($("smoothFrom").value, 10), e = parseInt($("smoothTo").value, 10);
+      if (isNaN(s) || isNaN(e) || s < 1 || e < 1 || s > pts.length || e > pts.length || s >= e){
+        report("시작 점과 끝 점 번호를 확인하세요 (시작 < 끝, 1~" + pts.length + ")."); return;
+      }
+      var si = s - 1, ei = e - 1, closed = settings().closed;
+      function anchorAt(i){
+        if (closed){
+          var n = pts.length;
+          return pts[((i % n) + n) % n];
+        }
+        if (i < 0) return pts[0];
+        if (i >= pts.length) return pts[pts.length - 1];
+        return pts[i];
+      }
+      var newPts = pts.slice(0, si + 1), added = 0, skipped = 0;
+      for (var k = si; k < ei; k++){
+        var a = pts[k], b = pts[k + 1];
+        var chord = Math.hypot(b.sx - a.sx, b.sy - a.sy);
+        if (chord < 0.5){ newPts.push(b); skipped++; continue; }
+        var p0 = anchorAt(k - 1), p3 = anchorAt(k + 2);
+        var steps = Math.max(2, Math.min(32, Math.round(chord / 4)));
+        for (var j = 1; j < steps; j++){
+          var t = j / steps;
+          var c = catmullRom(p0, a, b, p3, t);
+          newPts.push({ rx: a.rx + t * (b.rx - a.rx), ry: a.ry + t * (b.ry - a.ry),
+            sx: c.x, sy: c.y, status: "snap", seq: ++S.seq, via: "smooth", dist: 0 });
+          added++;
+        }
+        newPts.push(b);
+      }
+      newPts = newPts.concat(pts.slice(ei + 1));
+      if (!added){
+        report("부드럽게 연결할 구간이 없습니다" + (skipped ? " (" + skipped + "개 구간은 점이 겹쳐 직선 유지)" : "") + ".");
+        return;
+      }
+      pushHistory();
+      S.points = newPts; S.selected = -1;
+      render(); renderTable(); syncButtons();
+      report("곡선 연결 완료: 점 " + s + "~" + e + " (" + (ei - si) + "개 구간)에 " + added + "개 점 추가" +
+        (skipped ? ", " + skipped + "개 구간은 직선 유지" : "") + ". 실행취소로 되돌릴 수 있습니다.");
+    }
+    $("btnSmooth").addEventListener("click", smoothRange);
 
     var pointers = new Map();
     canvas.addEventListener("pointerdown", function(e){
