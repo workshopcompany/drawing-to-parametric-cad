@@ -310,6 +310,12 @@
               <button class="btn" id="btnSmooth">곡선으로 연결</button>
             </div>
             <div class="hint" id="smoothStatus">시작~끝 점 사이 구간을 곡선(Catmull-Rom)으로 연결해 중간점을 채웁니다. 점 번호는 화면의 # 번호이며, 곡선은 양 끝점을 그대로 지납니다.</div>
+            <div class="row" style="margin-top:10px">
+              <label>곡선 합치기</label>
+              <button class="btn" id="btnMergeCurve">하나의 곡선으로 만들기</button>
+              <button class="btn" id="btnDissolveCurve">곡선 해제</button>
+            </div>
+            <div class="hint" id="curveStatus">위 시작~끝 점 번호 구간을 하나의 곡선으로 합칩니다. 합치면 중간 smooth점은 제거되고 남은 점들을 지나는 스플라인 하나로 표시·내보내기됩니다. 해제는 곡선 표시만 되돌리며, 제거된 중간점은 실행취소로만 복원됩니다.</div>
             <div class="hint">
               <b>점 편집</b> — 스냅된 점을 드래그해 고치고, 선 위를 <b>더블클릭</b>하면 그 자리에 점이 추가됩니다.
               점을 <b>우클릭</b>하거나 목록에서 ✕를 누르면 삭제, <span class="kbd">Ctrl</span>+<span class="kbd">Z</span>는 실행취소입니다.
@@ -510,6 +516,7 @@
       img: null, imgName: "", imgW: 0, imgH: 0,
       mask: null, maskCanvas: null,       // Uint8Array ink mask + preview canvas
       points: [],                          // {rx,ry,sx,sy,status:'snap'|'manual'|'none',seq,via,dist}
+      curves: [],                          // merged curves: {a,b} point seqs of the span's endpoints
       lines: [],                           // {id,kind:'traced'|'straight',color,seed:{x,y},raw:[{x,y}],points:[{x,y}],stop:'end'|'junction'|'loop'|'limit'}
       draft: [],                           // straight-draw vertices in progress (not yet a finished line)
       draftHover: null,                    // cursor position for the draft rubber-band segment
@@ -553,12 +560,12 @@
     function isFar(p){ return !!p && typeof p.dist === "number" && p.dist > settings().radius; }
 
     /* ================= history ================= */
-    function snapshotState(){ return JSON.stringify({ points: S.points, lines: S.lines, paint: S.paint }); }
+    function snapshotState(){ return JSON.stringify({ points: S.points, lines: S.lines, paint: S.paint, curves: S.curves }); }
     function restoreState(json){
       try {
         var o = JSON.parse(json);
-        if (Array.isArray(o)) { S.points = o; }
-        else { S.points = o.points || []; S.lines = o.lines || []; S.paint = o.paint || []; }
+        if (Array.isArray(o)) { S.points = o; S.curves = []; }
+        else { S.points = o.points || []; S.lines = o.lines || []; S.paint = o.paint || []; S.curves = o.curves || []; }
       } catch (e) { S.points = []; }
       rebuildPaint();
       S.selected = -1; S.selectedLine = -1;
@@ -584,7 +591,7 @@
       $("btnDeleteSel").disabled = S.selected < 0;
       var btnDL = $("btnDeleteLine"); if (btnDL) btnDL.disabled = S.selectedLine < 0;
       var farN = S.points.filter(isFar).length;
-      $("statPoints").textContent = "점 " + S.points.length + "개" + (farN ? " · 반경 초과 " + farN + "개" : "");
+      $("statPoints").textContent = "점 " + S.points.length + "개" + (S.curves.length ? " · 곡선 " + S.curves.length + "개" : "") + (farN ? " · 반경 초과 " + farN + "개" : "");
       var linePts = S.lines.reduce(function(a, l){ return a + l.points.length; }, 0);
       $("statLines").textContent = "선 " + S.lines.length + "개 · " + linePts + "점";
       updateDraftUI();
@@ -605,7 +612,7 @@
     }
     function setupImage(img, name){
       S.img = img; S.imgName = name; S.imgW = img.naturalWidth; S.imgH = img.naturalHeight;
-      S.points = []; S.lines = []; S.paint = []; S.calibPts = []; S.history = []; S.selected = -1; S.selectedLine = -1; S.seq = 0; S.draft = []; S.draftHover = null; S.paintHover = null; resetPendingClicks();
+      S.points = []; S.lines = []; S.paint = []; S.curves = []; S.calibPts = []; S.history = []; S.selected = -1; S.selectedLine = -1; S.seq = 0; S.draft = []; S.draftHover = null; S.paintHover = null; resetPendingClicks();
       $("emptyState").style.display = "none";
       buildMask();
       rebuildPaint();
@@ -1160,12 +1167,44 @@
         pts.forEach(function(p, i){ i ? ctx.lineTo(p.rx, p.ry) : ctx.moveTo(p.rx, p.ry); });
         if (closed && pts.length > 2) ctx.closePath();
         ctx.stroke(); ctx.setLineDash([]);
-        /* snapped polyline */
+        /* snapped polyline: straight segments red, merged-curve spans teal.
+           The closing segment of a closed outline is a chord, except when
+           one curve span covers every point — then it is curve, too. */
+        var spans = curveSpans();
+        function segInSpan(i, j){
+          return spans.some(function(s){ return i >= s.i0 && j <= s.i1; });
+        }
+        var fullCurve = closed && pts.length > 2 &&
+          spans.some(function(s){ return s.i0 === 0 && s.i1 === pts.length - 1; });
         ctx.strokeStyle = "#d92d20"; ctx.lineWidth = 2.2 * inv;
         ctx.beginPath();
-        pts.forEach(function(p, i){ i ? ctx.lineTo(p.sx, p.sy) : ctx.moveTo(p.sx, p.sy); });
-        if (closed && pts.length > 2) ctx.closePath();
+        var pen = false;
+        for (var si = 0; si < pts.length - 1; si++){
+          if (segInSpan(si, si + 1)){ pen = false; continue; }
+          if (!pen){ ctx.moveTo(pts[si].sx, pts[si].sy); pen = true; }
+          ctx.lineTo(pts[si + 1].sx, pts[si + 1].sy);
+        }
+        if (closed && pts.length > 2 && !fullCurve){
+          if (!pen) ctx.moveTo(pts[pts.length - 1].sx, pts[pts.length - 1].sy);
+          ctx.lineTo(pts[0].sx, pts[0].sy);
+        }
         ctx.stroke();
+        ctx.strokeStyle = "#0e7c6b"; ctx.lineWidth = 2.2 * inv;
+        spans.forEach(function(s){
+          var sam = sampleCurveSpan(pts, s.i0, s.i1, closed);
+          ctx.beginPath();
+          sam.forEach(function(p, k){ k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); });
+          ctx.stroke();
+          if (fullCurve && s.i0 === 0 && s.i1 === pts.length - 1){
+            var n = pts.length;
+            var closeSam = sampleSegment(pts[n - 2], pts[n - 1], pts[0], pts[1]);
+            ctx.beginPath();
+            ctx.moveTo(pts[n - 1].sx, pts[n - 1].sy);
+            closeSam.forEach(function(p){ ctx.lineTo(p.x, p.y); });
+            ctx.lineTo(pts[0].sx, pts[0].sy);
+            ctx.stroke();
+          }
+        });
         /* rough->snap connectors */
         ctx.strokeStyle = "rgba(120,130,140,.5)"; ctx.lineWidth = 1 * inv;
         pts.forEach(function(p){
@@ -1257,12 +1296,14 @@
         tb.innerHTML = '<tr><td colspan="8"><div class="noresult">아직 찍은 점이 없습니다</div></td></tr>';
         return;
       }
+      var curveIdx = {};
+      curveSpans().forEach(function(s){ for (var ci = s.i0; ci <= s.i1; ci++) curveIdx[ci] = true; });
       tb.innerHTML = S.points.map(function(p, i){
         var mm = pointMM(p);
         return "<tr data-i='" + i + "'" + (i === S.selected ? " class='sel'" : "") + ">" +
           "<td>" + (i + 1) + "</td><td>" + (p.seq || (i + 1)) + "</td><td>" + fmt(p.sx, 0) + "</td><td>" + fmt(p.sy, 0) + "</td>" +
           "<td>" + (mm ? fmt(mm.x, 3) : "—") + "</td><td>" + (mm ? fmt(mm.y, 3) : "—") + "</td>" +
-          "<td class='st'>" + statusTag(p.status) + (p.via === "traced" ? " <span class='tag traced'>추적</span>" : (p.via === "smooth" ? " <span class='tag smooth'>부드럽게</span>" : "")) + (isFar(p) ? " <span class='tag far'>반경 초과 " + Math.round(p.dist) + "px</span>" : "") + "</td>" +
+          "<td class='st'>" + statusTag(p.status) + (p.via === "traced" ? " <span class='tag traced'>추적</span>" : (p.via === "smooth" ? " <span class='tag smooth'>부드럽게</span>" : "")) + (curveIdx[i] ? " <span class='tag smooth'>곡선</span>" : "") + (isFar(p) ? " <span class='tag far'>반경 초과 " + Math.round(p.dist) + "px</span>" : "") + "</td>" +
           "<td><button class='rowdel' data-del='" + i + "' title='점 삭제' aria-label='점 " + (i + 1) + " 삭제'>✕</button></td></tr>";
       }).join("");
     }
@@ -1275,14 +1316,18 @@
     function deletePoint(i){
       if (i < 0 || i >= S.points.length) return;
       pushHistory();
-      S.points.splice(i, 1); S.selected = -1;
+      var ds = S.points[i].seq;
+      S.points.splice(i, 1);
+      /* a curve whose endpoint is gone reverts to plain chords */
+      S.curves = S.curves.filter(function(c){ return c.a !== ds && c.b !== ds; });
+      S.selected = -1;
       render(); renderTable(); syncButtons();
       toast("점 " + (i + 1) + "을 삭제했습니다.");
     }
     $("btnDeleteSel").addEventListener("click", function(){ if (S.selected >= 0) deletePoint(S.selected); });
     $("btnClear").addEventListener("click", function(){
-      if (!S.points.length && !S.lines.length && !S.paint.length) return;
-      pushHistory(); S.points = []; S.lines = []; S.paint = []; S.selected = -1; S.selectedLine = -1; S.draft = []; S.draftHover = null;
+      if (!S.points.length && !S.lines.length && !S.paint.length && !S.curves.length) return;
+      pushHistory(); S.points = []; S.lines = []; S.paint = []; S.curves = []; S.selected = -1; S.selectedLine = -1; S.draft = []; S.draftHover = null;
       rebuildPaint();
       render(); renderTable(); renderLineList(); syncButtons(); toast("모든 점과 선, 칠하기를 지웠습니다. 실행취소로 되돌릴 수 있습니다.");
     });
@@ -1799,7 +1844,7 @@
     function outlineEntries(){
       var list = [];
       if (S.points.length >= 2){
-        var sp = S.points.map(function(p){ return { x: p.sx, y: p.sy }; });
+        var sp = pointOutlineSamples();
         var gap = Math.hypot(sp[0].x - sp[sp.length - 1].x, sp[0].y - sp[sp.length - 1].y);
         list.push({ label: "점 윤곽", kind: "points", pts: sp, gap: gap,
                     closed: S.points.length >= 3 && (settings().closed || gap <= 3) });
@@ -2301,16 +2346,23 @@
         y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)
       };
     }
+    /* shared range validation for the smooth / merge / dissolve buttons:
+       the start/end inputs above are the point # labels, 1-based. */
+    function readSmoothRange(){
+      var pts = S.points;
+      if (!pts.length) return { err: "먼저 점을 찍으세요." };
+      var s = parseInt($("smoothFrom").value, 10), e = parseInt($("smoothTo").value, 10);
+      if (isNaN(s) || isNaN(e) || s < 1 || e < 1 || s > pts.length || e > pts.length || s >= e)
+        return { err: "시작 점과 끝 점 번호를 확인하세요 (시작 < 끝, 1~" + pts.length + ")." };
+      return { si: s - 1, ei: e - 1, s: s, e: e };
+    }
     function smoothRange(){
       var statusEl = $("smoothStatus");
       function report(msg){ if (statusEl) statusEl.textContent = msg; toast(msg); }
+      var r = readSmoothRange();
+      if (r.err){ report(r.err); return; }
       var pts = S.points;
-      if (!pts.length){ report("먼저 점을 찍으세요."); return; }
-      var s = parseInt($("smoothFrom").value, 10), e = parseInt($("smoothTo").value, 10);
-      if (isNaN(s) || isNaN(e) || s < 1 || e < 1 || s > pts.length || e > pts.length || s >= e){
-        report("시작 점과 끝 점 번호를 확인하세요 (시작 < 끝, 1~" + pts.length + ")."); return;
-      }
-      var si = s - 1, ei = e - 1, closed = settings().closed;
+      var si = r.si, ei = r.ei, closed = settings().closed;
       function anchorAt(i){
         if (closed){
           var n = pts.length;
@@ -2348,10 +2400,126 @@
       pushHistory();
       S.points = newPts; S.selected = -1;
       render(); renderTable(); syncButtons();
-      report("곡선 연결 완료: 점 " + s + "~" + e + " (" + (ei - si) + "개 구간)에 " + added + "개 점 추가" +
+      report("곡선 연결 완료: 점 " + r.s + "~" + r.e + " (" + (ei - si) + "개 구간)에 " + added + "개 점 추가" +
         (skipped ? ", " + skipped + "개 구간은 직선 유지" : "") + ". 실행취소로 되돌릴 수 있습니다.");
     }
     $("btnSmooth").addEventListener("click", smoothRange);
+
+    /* ================= merged curves: many points -> one curve ==========
+       A merged curve is a span of the live point sequence, stored as the
+       endpoint seqs ({a, b}); the span's points stay live, so dragging an
+       anchor reshapes the curve, inserting a point inside a span extends
+       it, and deleting an endpoint dissolves it back to chords. Display
+       (stroke, fill, export polygon) samples the span as one Catmull-Rom
+       spline instead of straight chords. Merging removes the span's
+       via:'smooth' intermediates (they were only the step-1 preview);
+       dissolving does NOT restore them — undo does. */
+    function curveSpans(){
+      var spans = [];
+      S.curves.forEach(function(c){
+        var i0 = -1, i1 = -1;
+        S.points.forEach(function(p, i){
+          if (p.seq === c.a) i0 = i;
+          if (p.seq === c.b) i1 = i;
+        });
+        if (i0 >= 0 && i1 > i0) spans.push({ i0: i0, i1: i1, a: c.a, b: c.b });
+      });
+      return spans;
+    }
+    /* interior samples of ONE Catmull-Rom segment (endpoints excluded) */
+    function sampleSegment(p0, a, b, p3){
+      var out = [];
+      var chord = Math.hypot(b.sx - a.sx, b.sy - a.sy);
+      if (!isFinite(chord) || chord < 0.5) return out;
+      var steps = Math.max(2, Math.min(32, Math.round(chord / 4)));
+      for (var j = 1; j < steps; j++){
+        var t = j / steps;
+        var c = catmullRom({ x: p0.sx, y: p0.sy }, { x: a.sx, y: a.sy },
+                           { x: b.sx, y: b.sy }, { x: p3.sx, y: p3.sy }, t);
+        out.push({ x: c.x, y: c.y });
+      }
+      return out;
+    }
+    /* sampled points of a whole span, endpoints included */
+    function sampleCurveSpan(pts, i0, i1, closed){
+      function at(k){
+        if (closed){ var n = pts.length; return pts[((k % n) + n) % n]; }
+        if (k < 0) return pts[0];
+        if (k >= pts.length) return pts[pts.length - 1];
+        return pts[k];
+      }
+      var out = [{ x: pts[i0].sx, y: pts[i0].sy }];
+      for (var k = i0; k < i1; k++){
+        sampleSegment(at(k - 1), pts[k], pts[k + 1], at(k + 2)).forEach(function(p){ out.push(p); });
+        out.push({ x: pts[k + 1].sx, y: pts[k + 1].sy });
+      }
+      return out;
+    }
+    /* display path of the point outline: curve spans sampled, others raw.
+       Touching spans share exactly one joint point, never duplicated. */
+    function pointOutlineSamples(){
+      var spans = curveSpans(), out = [];
+      var spanStart = {};
+      spans.forEach(function(s){ spanStart[s.i0] = s; });
+      var closed = settings().closed, i = 0;
+      while (i < S.points.length){
+        var s = spanStart[i];
+        if (s){
+          var sam = sampleCurveSpan(S.points, s.i0, s.i1, closed);
+          for (var k = 0; k < sam.length - 1; k++) out.push(sam[k]);
+          i = s.i1;
+        } else {
+          out.push({ x: S.points[i].sx, y: S.points[i].sy });
+          i++;
+        }
+      }
+      /* closed outline whose span covers every point: the closing segment
+         (last -> first) belongs to the curve, not a chord — it comes after
+         the last point in path order, before closePath returns to first */
+      if (closed && S.points.length > 2 &&
+          spans.some(function(s){ return s.i0 === 0 && s.i1 === S.points.length - 1; })){
+        var n = S.points.length;
+        sampleSegment(S.points[n - 2], S.points[n - 1], S.points[0], S.points[1])
+          .forEach(function(p){ out.push(p); });
+      }
+      return out;
+    }
+    function mergeRange(){
+      var statusEl = $("curveStatus");
+      function report(msg){ if (statusEl) statusEl.textContent = msg; toast(msg); }
+      var r = readSmoothRange();
+      if (r.err){ report(r.err); return; }
+      var pts = S.points, si = r.si, ei = r.ei;
+      var overlap = curveSpans().some(function(s){ return si < s.i1 && ei > s.i0; });
+      if (overlap){ report("이미 곡선으로 합쳐진 구간과 겹칩니다. 겹치는 곡선을 먼저 해제하세요."); return; }
+      var aSeq = pts[si].seq, bSeq = pts[ei].seq, removed = 0, kept = [];
+      for (var i = 0; i < pts.length; i++){
+        if (i > si && i < ei && pts[i].via === "smooth"){ removed++; continue; }
+        kept.push(pts[i]);
+      }
+      pushHistory();
+      S.points = kept;
+      S.curves.push({ a: aSeq, b: bSeq });
+      S.selected = -1;
+      render(); renderTable(); syncButtons();
+      report("하나의 곡선으로 합쳤습니다: 점 " + r.s + "~" + r.e +
+        (removed ? " (중간 smooth점 " + removed + "개 제거)" : "") + ". 실행취소로 되돌릴 수 있습니다.");
+    }
+    function dissolveRange(){
+      var statusEl = $("curveStatus");
+      function report(msg){ if (statusEl) statusEl.textContent = msg; toast(msg); }
+      var r = readSmoothRange();
+      if (r.err){ report(r.err); return; }
+      var pts = S.points, aSeq = pts[r.si].seq, bSeq = pts[r.ei].seq, idx = -1;
+      S.curves.forEach(function(c, k){ if (c.a === aSeq && c.b === bSeq) idx = k; });
+      if (idx < 0){ report("해당 범위(점 " + r.s + "~" + r.e + ")에 합쳐진 곡선이 없습니다."); return; }
+      pushHistory();
+      S.curves.splice(idx, 1);
+      render(); renderTable(); syncButtons();
+      report("곡선을 해제했습니다: 점 " + r.s + "~" + r.e + " 구간이 다시 직선으로 표시됩니다. (합치기 때 제거된 중간점은 실행취소로만 복원됩니다.)");
+    }
+    $("btnMergeCurve").addEventListener("click", mergeRange);
+    $("btnDissolveCurve").addEventListener("click", dissolveRange);
 
     var pointers = new Map();
     canvas.addEventListener("pointerdown", function(e){
@@ -2720,7 +2888,7 @@
       var st = settings();
       var ls = lineSettings();
       return {
-        tool: "drawing-outline-snap", version: 4,
+        tool: "drawing-outline-snap", version: 5,
         exported_at: new Date().toISOString(),
         image: { name: S.imgName, width: S.imgW, height: S.imgH },
         settings: { ink_threshold: st.threshold, snap_radius_px: st.radius, closed: st.closed, drag_resnap_on_drop: st.resnap, click_snap_on: st.snap, line_gap_bridge_px: ls.gap, line_smooth_passes: ls.smooth },
@@ -2765,6 +2933,22 @@
               var mm = pointMM({ sx: p.x, sy: p.y });
               return mm ? { x: Math.round(mm.x * 1000) / 1000, y: Math.round(mm.y * 1000) / 1000 } : null;
             })
+          };
+        }),
+        curves: curveSpans().map(function(s){
+          var spanPts = S.points.slice(s.i0, s.i1 + 1);
+          var sam = sampleCurveSpan(S.points, s.i0, s.i1, st.closed);
+          function mmOf(p){
+            var mm = pointMM(p);
+            return mm ? { x: Math.round(mm.x * 1000) / 1000, y: Math.round(mm.y * 1000) / 1000 } : null;
+          }
+          return {
+            note: "하나의 곡선으로 합쳐진 구간: anchors는 합치기 후 남은 점들이며, sampled는 그 점들을 지나는 Catmull-Rom 스플라인의 샘플입니다. 다음 단계(모델)에서 이 구간은 직선 폴리라인이 아니라 하나의 B-스플라인으로 만들어야 합니다.",
+            start_index: s.i0 + 1, end_index: s.i1 + 1, start_seq: s.a, end_seq: s.b,
+            anchors_px: spanPts.map(function(p){ return { x: Math.round(p.sx * 10) / 10, y: Math.round(p.sy * 10) / 10 }; }),
+            anchors_mm: spanPts.map(function(p){ return mmOf(p); }),
+            sampled_px: sam.map(function(p){ return { x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }; }),
+            sampled_mm: sam.map(function(p){ return mmOf({ sx: p.x, sy: p.y }); })
           };
         }),
         fills: {
@@ -2851,6 +3035,10 @@
             return NL;
           }) : [];
           S.selectedLine = -1;
+          S.curves = (j.curves && Array.isArray(j.curves)) ? j.curves.filter(function(c){
+            return S.points.some(function(p){ return p.seq === c.a; }) &&
+                   S.points.some(function(p){ return p.seq === c.b; });
+          }).map(function(c){ return { a: c.a, b: c.b }; }) : [];
           S.paint = (j.fills && Array.isArray(j.fills.manual_paint_strokes)) ? j.fills.manual_paint_strokes.map(function(st){
             if (st.flood){
               var sd = st.seed || (st.pts && st.pts[0]) || { x: 0, y: 0 };
@@ -2885,7 +3073,7 @@
           }
           S.selected = -1;
           syncCalibInputs(); render(); renderTable(); renderLineList(); syncButtons(); updateCalibStatus();
-          toast("점 " + S.points.length + "개, 선 " + S.lines.length + "개와 캘리브레이션을 복원했습니다.");
+          toast("점 " + S.points.length + "개, 선 " + S.lines.length + "개" + (S.curves.length ? ", 곡선 " + S.curves.length + "개" : "") + "와 캘리브레이션을 복원했습니다.");
         } catch (err){ toast("JSON을 읽지 못했습니다: " + err.message); }
       };
       reader.readAsText(f);
