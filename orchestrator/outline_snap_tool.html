@@ -2324,12 +2324,16 @@
       for (var k = si; k < ei; k++){
         var a = pts[k], b = pts[k + 1];
         var chord = Math.hypot(b.sx - a.sx, b.sy - a.sy);
-        if (chord < 0.5){ newPts.push(b); skipped++; continue; }
+        if (!isFinite(chord) || chord < 0.5){ newPts.push(b); skipped++; continue; }
         var p0 = anchorAt(k - 1), p3 = anchorAt(k + 2);
         var steps = Math.max(2, Math.min(32, Math.round(chord / 4)));
         for (var j = 1; j < steps; j++){
           var t = j / steps;
-          var c = catmullRom(p0, a, b, p3, t);
+          /* points carry sx/sy, catmullRom reads x/y: convert here.
+             Passing point objects directly yields NaN intermediates
+             (invisible points, straight chords, renumbered anchors). */
+          var c = catmullRom({ x: p0.sx, y: p0.sy }, { x: a.sx, y: a.sy },
+                             { x: b.sx, y: b.sy }, { x: p3.sx, y: p3.sy }, t);
           newPts.push({ rx: a.rx + t * (b.rx - a.rx), ry: a.ry + t * (b.ry - a.ry),
             sx: c.x, sy: c.y, status: "snap", seq: ++S.seq, via: "smooth", dist: 0 });
           added++;
