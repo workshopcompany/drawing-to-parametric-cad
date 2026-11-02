@@ -280,7 +280,7 @@
 
           <div class="panel">
             <h2>스냅 설정</h2>
-            <p class="sub">클릭 위치 주변에서 가장 가까운 어두운 선 픽셀을 찾습니다.</p>
+            <p class="sub">클릭 시 선에 스냅이 켜져 있으면 클릭 위치 주변에서 가장 가까운 어두운 선 픽셀을 찾습니다.</p>
             <div class="row">
               <label for="rngRadius">스냅 반경</label>
               <input type="range" id="rngRadius" min="4" max="80" step="1" value="28" />
@@ -295,6 +295,8 @@
               <small>임계값으로 잡힌 픽셀을 붉게 표시합니다. 가는 선이 사라지면 임계값을 올리세요.</small></label>
             <label class="check"><input type="checkbox" id="chkClosed" /> 윤곽 닫기
               <small>마지막 점과 첫 점을 이어 닫힌 윤곽으로 표시하고 내보냅니다.</small></label>
+            <label class="check"><input type="checkbox" id="chkSnap" checked /> 클릭 시 선에 스냅
+              <small>켜져 있으면 클릭한 점이 반경 안의 선 중심으로 붙습니다. 끄면 클릭한 자리에 그대로 찍힙니다.</small></label>
             <label class="check"><input type="checkbox" id="chkResnap" checked /> 드래그를 놓을 때 다시 스냅
               <small>수동으로 옮긴 점도 놓는 위치 근처의 선에 다시 붙입니다. 끄면 옮긴 자리가 그대로 확정됩니다.</small></label>
             <button class="btn" id="btnTraceAlong" style="margin-top:10px">선 따라 보정</button>
@@ -527,7 +529,8 @@
         threshold: parseInt($("rngThresh").value, 10),
         showMask: $("chkMask").checked,
         closed: $("chkClosed").checked,
-        resnap: $("chkResnap").checked
+        resnap: $("chkResnap").checked,
+        snap: $("chkSnap").checked
       };
     }
     function toast(msg){
@@ -2134,7 +2137,8 @@
          segment being split for an insert): at a crossing it says which line
          the user means, so the crossing line cannot hijack the point. */
       var s = null;
-      if (S.mask){
+      var snapOn = settings().snap;
+      if (S.mask && snapOn){
         var hint = hintDir;
         if (!hint && S.points.length){
           var lp = S.points[S.points.length - 1];
@@ -2146,7 +2150,8 @@
         s = centerSnapOnMask(S.mask, S.imgW, S.imgH, x, y, settings().radius, hint);
       }
       var pt = s ? { rx: x, ry: y, sx: s.x, sy: s.y, status: "snap" }
-                 : { rx: x, ry: y, sx: x, sy: y, status: "none" };
+                 : (!snapOn ? { rx: x, ry: y, sx: x, sy: y, status: "manual" }
+                            : { rx: x, ry: y, sx: x, sy: y, status: "none" });
       pt.seq = ++S.seq;                 /* click order, independent of polyline position */
       pt.via = via || "click";          /* 'click' | 'insert' (dblclick) | 'import' | 'traced' */
       pt.dist = Math.hypot(pt.sx - pt.rx, pt.sy - pt.ry);
@@ -2513,7 +2518,7 @@
       if (S.drag && S.drag.type === "point" && S.drag.moved){
         var pt = S.points[S.drag.idx];
         pushHistorySilent();
-        if (settings().resnap){
+        if (settings().snap && settings().resnap){
           var s = snapToLine(pt.sx, pt.sy);
           if (s){
             /* centerline refinement with the dragged point's own segment
@@ -2530,7 +2535,7 @@
           }
         }
         pt.dist = Math.hypot(pt.sx - pt.rx, pt.sy - pt.ry);
-        if (settings().resnap && isFar(pt) && !S.drag.wasFar)
+        if (settings().snap && settings().resnap && isFar(pt) && !S.drag.wasFar)
           toast("주의: 점 " + (S.drag.idx + 1) + "이 원래 클릭 위치에서 " + Math.round(pt.dist) + "px 떨어진 선에 다시 붙었습니다 (스냅 반경 " + settings().radius + "px 초과 — '반경 초과'로 표시됩니다).");
         render(); renderTable(); syncButtons();
       }
@@ -2640,7 +2645,7 @@
         tool: "drawing-outline-snap", version: 4,
         exported_at: new Date().toISOString(),
         image: { name: S.imgName, width: S.imgW, height: S.imgH },
-        settings: { ink_threshold: st.threshold, snap_radius_px: st.radius, closed: st.closed, drag_resnap_on_drop: st.resnap, line_gap_bridge_px: ls.gap, line_smooth_passes: ls.smooth },
+        settings: { ink_threshold: st.threshold, snap_radius_px: st.radius, closed: st.closed, drag_resnap_on_drop: st.resnap, click_snap_on: st.snap, line_gap_bridge_px: ls.gap, line_smooth_passes: ls.smooth },
         calibration: {
           mode: calib.piecewise ? "piecewise" : "single",
           origin_px: { x: calib.originX, y: calib.originY },
@@ -2796,6 +2801,7 @@
             if (j.settings.snap_radius_px){ $("rngRadius").value = j.settings.snap_radius_px; $("valRadius").textContent = j.settings.snap_radius_px + "px"; }
             $("chkClosed").checked = !!j.settings.closed;
             if (j.settings.drag_resnap_on_drop !== undefined && j.settings.drag_resnap_on_drop !== null) $("chkResnap").checked = !!j.settings.drag_resnap_on_drop;
+            if (j.settings.click_snap_on !== undefined && j.settings.click_snap_on !== null) $("chkSnap").checked = !!j.settings.click_snap_on;
             if (typeof j.settings.line_gap_bridge_px === "number"){ $("rngGap").value = j.settings.line_gap_bridge_px; $("valGap").textContent = j.settings.line_gap_bridge_px + "px"; }
             if (typeof j.settings.line_smooth_passes === "number"){ $("rngSmooth").value = j.settings.line_smooth_passes; $("valSmooth").textContent = j.settings.line_smooth_passes; }
           }
