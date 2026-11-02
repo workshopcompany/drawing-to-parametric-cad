@@ -4818,8 +4818,838 @@ def run_suggest_mode(output_dir, drawing_path, model, max_tokens,
     return _finish(0)
 
 
+# ---------------------------------------------------------------------------
+# Build-first + whole-conversation + frame-check package
+# (Nov 1, 2026 user direction: do NOT summarise the conversation — send
+# it whole and let the LLM analyse it itself; build first, questions
+# only after the draft exists; a frame gate that MEASURES geometry
+# instead of trusting parameters or "Confirmed" notes; the model is
+# chosen in the web UI, not hardcoded.)
+# ---------------------------------------------------------------------------
+
+OUTLINE_PLACEHOLDER = "__OUTLINE_POINTS__"
+ALLOWED_MODELS = ("muse-spark-1.3", "muse-spark-1.3-contributor")
+FRAME_TOL_MM = 0.1
+DATUM_TOL_MM = 0.05
+
+BUILD_FIRST_RESPONSE_FORMAT = (
+    "RESPONSE FORMAT (build): output the FreeCAD macro in one "
+    "```python fence FIRST. After the fence, output these sections "
+    "(no code fences):\n"
+    "VIEW MATCHING: <the view-matching analysis: view inventory, "
+    "cross-view matches, profile matching table, what remains "
+    "undecided.>\n"
+    "Then a numbered dimension list in exactly this format: D1: "
+    "<what it is> = <value> mm @ (x, y) [view].\n"
+    "Then a FRAME block: one line starting with 'FRAME:' giving "
+    "horizontal=X/Y/Z, depth=X/Y/Z, vertical=X/Y/Z (a permutation "
+    "of X, Y, Z), the datum plane description and the two features "
+    "meeting at it in parentheses, and the overall extents as "
+    "'width <v> mm on <axis>, depth <v> mm on <axis>, height <v> "
+    "mm on <axis>'.\n"
+    "Then an UNCERTAIN section: one line starting with 'UNCERTAIN:' "
+    "followed by one bullet per item this draft could not decide "
+    "(a value, a mapping, a shape point) — one per line, no "
+    "Q-numbers. For this build, UNCERTAIN replaces macro-header "
+    "Q-lines: mark uncertain values INFERRED in the macro as usual, "
+    "but list them ONLY in the UNCERTAIN section, not as Q-lines "
+    "in the header. Items already answered by the user or confirmed "
+    "are NOT uncertain — never list them."
+)
+
+PLACEHOLDER_INSTRUCTION = (
+    "OUTLINE POINTS (placeholder): an outline image is attached but "
+    "no traced numeric points are in this prompt. Do NOT write "
+    "outline point coordinates yourself and do NOT hand-sketch the "
+    "outline as a rectangle or polygon. In the macro, define the "
+    "outline point list with exactly this line, once: "
+    "PTS = __OUTLINE_POINTS__ . Build the outline sketch from PTS "
+    "(a list of (x, y) mm pairs in boundary order, X = 0 at the "
+    "outline centre, Y = 0 at the outline bottom, as traced "
+    "mechanically from the image). The pipeline replaces "
+    "__OUTLINE_POINTS__ with the exact traced points before running "
+    "the macro. Also declare the outline scale in the macro header "
+    "with exactly this line: OUTLINE_WIDTH_MM: <the drawing "
+    "dimension in mm that spans the outline's full width, read from "
+    "the drawing's dimension lines, for example OUTLINE_WIDTH_MM: "
+    "4.8>. If no drawing dimension spans the outline width, write "
+    "OUTLINE_WIDTH_MM: NONE — do not guess a width."
+)
+
+WIDTH_Q_TEXT = (
+    "Outline real width in mm is needed to trace the outline to "
+    "exact points (it could not be declared from the drawing "
+    "dimensions). Give the width in mm."
+)
+
+
+def resolve_model(cli_model, output_dir):
+    """Model for this run: explicit --model wins, else the folder's
+    model.txt (a folder keeps the model it started with), else the
+    default. The web UI offers exactly two models; the CLI stays
+    free-form (a manual caller may name any model id)."""
+    if cli_model:
+        return cli_model
+    try:
+        saved = (Path(output_dir) / "model.txt").read_text(
+            encoding="utf-8").strip()
+        if saved:
+            return saved
+    except OSError:
+        pass
+    return DEFAULT_MODEL
+
+
+def collect_folder_context(output_dir, exclude_files=None):
+    """Whole folder record, unabridged, for build/patch prompts.
+
+    Nov 1, 2026 user rule: do NOT summarise or truncate the
+    conversation — send it whole and let the LLM analyse it
+    itself. Summarisation is itself a failure point (it loses
+    exact wording). So this dump carries the raw record:
+    Q&A history, pending questions, view matching, proposal,
+    dimensions, the current and previous macros, attempt macros,
+    run logs, feature history, report, and frame-check results.
+    Deliberately EXCLUDED (not conversation, and misleading):
+    guidance.txt (a derived summary, and patch mode never updates
+    it, so it can be stale) and matching.json (a direction-blind
+    parameter report, not evidence). Raw API JSON is excluded
+    too (the response content already lives in the macro,
+    questions, and sections above). No size cap: a run folder's
+    record is tens of thousands of tokens at most, far inside
+    the model's context window.
+    """
+    sections = [
+        ("qa_history.txt", "Q&A history (whole, unabridged)"),
+        ("questions.txt", "Pending questions"),
+        ("view_matching.txt", "View matching"),
+        ("outline_proposal.txt", "Outline proposal"),
+        ("dimensions.json", "Numbered dimensions (raw)"),
+        ("macro.py", "Current macro (whole)"),
+        ("macro.prev.py", "Previous macro (whole)"),
+        ("report.txt", "Run report"),
+        ("feature_history.json", "Feature history (measured)"),
+        ("frame_check.json", "Frame-check results (measured)"),
+    ]
+    excluded = set(exclude_files or [])
+    out = []
+    for name, label in sections:
+        if name in excluded:
+            continue
+        path = Path(output_dir) / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out.append(f"=== {name} — {label} ===\n{text}")
+    for path in sorted(Path(output_dir).glob("macro_attempt*.py")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out.append(f"=== {path.name} — attempt macro (whole) ===\n{text}")
+    for name in ("run.log", "run_patch.log"):
+        path = Path(output_dir) / name
+        if path.is_file():
+            try:
+                out.append(f"=== {name} — run log ===\n"
+                           f"{path.read_text(encoding='utf-8', errors='replace')}")
+            except OSError:
+                pass
+    for path in sorted(Path(output_dir).glob("run_attempt*.log")):
+        try:
+            out.append(f"=== {path.name} — attempt log ===\n"
+                       f"{path.read_text(encoding='utf-8', errors='replace')}")
+        except OSError:
+            continue
+    return "\n\n".join(out)
+
+
+def extract_uncertain(content):
+    """UNCERTAIN section items from a build response.
+
+    The section starts on a line beginning with UNCERTAIN (case
+    insensitive, colon optional) and runs until a VIEW MATCHING:,
+    FRAME:, DIMENSIONS:, code fence, Q-line, or D-line header, or
+    the end. Bullets/numbers are stripped; empty lines skipped.
+    """
+    items = []
+    in_section = False
+    for line in (content or "").splitlines():
+        stripped = line.strip()
+        if not in_section:
+            if re.match(r"(?i)^UNCERTAIN\b", stripped):
+                in_section = True
+                rest = re.sub(r"(?i)^UNCERTAIN\b[:\s]*", "", stripped)
+                if rest:
+                    items.append(rest)
+            continue
+        if re.match(r"(?i)^(VIEW MATCHING|FRAME|DIMENSIONS)\s*:",
+                    stripped):
+            break
+        if stripped.startswith("```"):
+            break
+        if re.match(r"[QD]\d+\s*[:=]", stripped):
+            break
+        if not stripped:
+            continue
+        item = re.sub(r"^([-*•]|\d+[.)])\s+", "", stripped)
+        if item:
+            items.append(item)
+    return items
+
+
+def extract_frame_block(content):
+    """FRAME block from a response (view matching / build output).
+
+    Format (see BUILD_FIRST_RESPONSE_FORMAT): a line starting
+    with 'FRAME:' giving horizontal/depth/vertical axes, a datum
+    description with the two meeting features in parentheses, and
+    overall extents as 'width <v> mm on <axis>' etc. Any part may
+    be missing — the caller fills defaults. Returns a dict with
+    only the parts actually found.
+    """
+    frame = {}
+    lines = (content or "").splitlines()
+    for i, line in enumerate(lines):
+        if not re.match(r"(?i)^FRAME\s*:", line.strip()):
+            continue
+        block = "\n".join(lines[i:i + 6])
+        for key in ("horizontal", "depth", "vertical"):
+            m = re.search(key + r"\s*[=:]\s*([XYZ])", block,
+                          re.IGNORECASE)
+            if m:
+                frame.setdefault("axes", {})[key] = m.group(1).upper()
+        m = re.search(r"datum\s*[=:]\s*([^\n(]+)", block, re.IGNORECASE)
+        if m:
+            frame.setdefault("datum", {})["description"] = m.group(1).strip()
+        m = re.search(r"datum[^\n]*\(([^)]*)\)", block, re.IGNORECASE)
+        if m:
+            feats = [f.strip() for f in m.group(1).split(",") if f.strip()]
+            if feats:
+                frame.setdefault("datum", {})["features"] = feats
+        extents = {}
+        for name in ("width", "depth", "height"):
+            m = re.search(name + r"\s+([0-9]+(?:\.[0-9]+)?)\s*(?:mm)?"
+                          r"\s+on\s+([XYZ])", block, re.IGNORECASE)
+            if m:
+                extents[name] = {"value": float(m.group(1)),
+                                 "axis": m.group(2).upper()}
+        if extents:
+            frame["extents"] = extents
+        break
+    return frame
+
+
+def parse_outline_width_declaration(content):
+    """OUTLINE_WIDTH_MM value declared by the LLM in a response.
+
+    Exact token first (see PLACEHOLDER_INSTRUCTION); the explicit
+    word NONE counts as 'no declaration', never as a width. Returns
+    a float, or None when absent/NONE/unparseable.
+    """
+    m = re.search(r"OUTLINE_WIDTH_MM\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
+                  content or "")
+    if m:
+        try:
+            val = float(m.group(1))
+            return val if val > 0 else None
+        except ValueError:
+            return None
+    return None
+
+
+def default_frame_declaration():
+    """Frame convention when nothing has declared one yet.
+
+    Front-horizontal = X, depth = Y, vertical = Z. This is a
+    program convention, not a fact from the drawing — the tab
+    shows it as a default so the user can correct it.
+    """
+    return {
+        "source": "default",
+        "axes": {"horizontal": "X", "depth": "Y", "vertical": "Z"},
+        "front_view": "",
+        "datum": {"description": "", "features": []},
+        "extents": {},
+        "dimensions": [],
+        "gate_off": False,
+    }
+
+
+def load_frame_declaration(output_dir):
+    """frame.json, or the default convention when absent/broken."""
+    try:
+        data = json.loads((Path(output_dir) / "frame.json")
+                          .read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            merged = default_frame_declaration()
+            merged.update(data)
+            merged.setdefault("axes", {}).update(
+                {k: v for k, v in
+                 default_frame_declaration()["axes"].items()
+                 if k not in merged["axes"]})
+            return merged
+    except Exception:
+        pass
+    return default_frame_declaration()
+
+
+def save_frame_declaration(output_dir, frame, source):
+    """Merge an LLM-declared FRAME block into frame.json.
+
+    A user-edited declaration (user_edited: true, set by the
+    frame tab) is NEVER overwritten by an LLM declaration — the
+    user's correction wins. Otherwise the LLM block updates the
+    axes/datum/extents it actually states, and leaves the rest
+    (including per-dimension axes the user may have set) alone.
+    Returns True when the file changed.
+    """
+    path = Path(output_dir) / "frame.json"
+    current = load_frame_declaration(output_dir)
+    if current.get("user_edited"):
+        return False
+    changed = False
+    if frame.get("axes"):
+        for key, axis in frame["axes"].items():
+            if axis in ("X", "Y", "Z") and current["axes"].get(key) != axis:
+                current["axes"][key] = axis
+                changed = True
+    if frame.get("datum"):
+        datum = current.setdefault("datum", {})
+        if frame["datum"].get("description") and \
+                datum.get("description") != frame["datum"]["description"]:
+            datum["description"] = frame["datum"]["description"]
+            changed = True
+        if frame["datum"].get("features") and \
+                datum.get("features") != frame["datum"]["features"]:
+            datum["features"] = frame["datum"]["features"]
+            changed = True
+    if frame.get("extents"):
+        current["extents"] = frame["extents"]
+        changed = True
+    if changed or not path.is_file():
+        current["source"] = source
+        path.write_text(json.dumps(current, indent=2, ensure_ascii=False),
+                        encoding="utf-8")
+        return True
+    return False
+
+
+def frame_gate_off(output_dir):
+    """True when the user turned the frame gate off for this folder."""
+    decl = load_frame_declaration(output_dir)
+    if decl.get("gate_off"):
+        return True
+    return (Path(output_dir) / "frame_gate_off").is_file()
+
+
+def _axis_size(tess, axis):
+    """Whole-part size on one world axis, from verify_step tuples."""
+    key = {"X": "tess_x", "Y": "tess_y", "Z": "tess_z"}[axis]
+    lo, hi = tess[key]
+    return hi - lo
+
+
+def _world_effect_bbox(feat):
+    """A feature's geometric effect bbox in world axes.
+
+    feat comes from frame_measure.py: sketch placement (base +
+    rotation matrix, rows = world axes), sketch Shape bbox as
+    dumped, pad/pocket Length and Reversed. The sketch Shape bbox
+    may already be in world coordinates (placement applied) or in
+    local coordinates — decided mechanically: if its extent on
+    the sketch-normal world axis is ~0, it is already world and
+    is used as-is; otherwise its corners are transformed by the
+    placement matrix. The result is then extended along the
+    sketch normal by Length (Reversed flips the side, never the
+    size). Returns {axis: (lo, hi)} or None when the placement
+    is not axis-aligned (a rotated sketch's world AABB would
+    inflate, so such features are skipped, not guessed).
+    """
+    try:
+        mat = feat["placement_matrix"]
+        base = feat.get("placement_base", [0.0, 0.0, 0.0])
+        local = feat["sketch_bbox"]
+        length = float(feat.get("length") or 0.0)
+        reversed_flag = bool(feat.get("reversed"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    # Rotation columns map local axes to world axes: column j is
+    # local axis j expressed in world coordinates. Axis-aligned
+    # means every column has exactly one entry of magnitude ~1.
+    mapping = {}
+    for lj in range(3):
+        col = [(mat[wi][lj], wi) for wi in range(3)]
+        nz = [(v, wi) for v, wi in col if abs(v) > 0.01]
+        if len(nz) != 1 or abs(abs(nz[0][0]) - 1.0) > 0.01:
+            return None
+        mapping[lj] = (nz[0][1], 1 if nz[0][0] > 0 else -1)
+    nwi, nsign = mapping[2]
+    raw = {"X": local[0], "Y": local[1], "Z": local[2]}
+    normal_axis = "XYZ"[nwi]
+    if abs(raw[normal_axis][1] - raw[normal_axis][0]) <= 0.01:
+        # Already world coordinates (placement applied by FreeCAD).
+        out = {a: (raw[a][0], raw[a][1]) for a in "XYZ"}
+    else:
+        # Local coordinates: transform the 8 bbox corners.
+        world = {0: [], 1: [], 2: []}
+        for x in local[0]:
+            for y in local[1]:
+                for z in local[2]:
+                    local_pt = (x, y, z)
+                    for wi in range(3):
+                        val = base[wi] + sum(
+                            mat[wi][lj] * local_pt[lj] for lj in range(3))
+                        world[wi].append(val)
+        out = {"XYZ"[wi]: (min(world[wi]), max(world[wi]))
+               for wi in range(3)}
+    # Extend along the sketch normal by Length.
+    direction = nsign * (-1 if reversed_flag else 1)
+    lo, hi = out[normal_axis]
+    if direction > 0:
+        out[normal_axis] = (lo, hi + length)
+    else:
+        out[normal_axis] = (lo - length, hi)
+    return out
+
+
+def check_frame(verification, frame_decl, feature_bboxes):
+    """Geometric frame gate: measured extents vs declared frame.
+
+    This measures the RESULT, it never summarises the conversation.
+    Whole-part extents come from verify_step's tessellation bbox
+    (true size for B-spline models). Per-dimension extents come
+    from frame_measure.py's per-feature effect bboxes. Datum contact
+    uses cumulative solid bboxes: the base feature's cumulative
+    bbox vs the final solid's bbox on the datum axis — the clip
+    must extend the base on exactly one side of that axis (a
+    side-glued clip that adds nothing on the datum axis fails,
+    as in the 175858 bracket run). Known blind spot, stated
+    plainly: bbox extents cannot see an interior gap when the
+    outer extents are right — the volume gate and the viewer
+    remain the backstop for that case.
+    Returns (passed, errors, warnings, measurements).
+    """
+    errors, warnings, measurements = [], [], {}
+    axes = frame_decl.get("axes", {})
+    tess = verification or {}
+    sizes = {}
+    for axis in ("X", "Y", "Z"):
+        try:
+            sizes[axis] = _axis_size(tess, axis)
+        except Exception:
+            pass
+    measurements["whole_sizes"] = sizes
+    # Full tess tuples, so a later --check-frame re-evaluation can
+    # rebuild the exact verification shape (including the datum
+    # final bbox) without touching FreeCAD.
+    try:
+        measurements["tess"] = {
+            "X": list(tess["tess_x"]), "Y": list(tess["tess_y"]),
+            "Z": list(tess["tess_z"])}
+    except Exception:
+        pass
+    # Whole-part extents: declared overall width/depth/height must
+    # sit on their declared axes.
+    for name, declared in (frame_decl.get("extents") or {}).items():
+        try:
+            value = float(declared["value"])
+            axis = declared["axis"]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if axis not in sizes:
+            continue
+        measured = sizes[axis]
+        measurements[f"extent_{name}"] = {
+            "declared": value, "axis": axis, "measured": measured}
+        if abs(measured - value) > FRAME_TOL_MM:
+            others = [a for a in ("X", "Y", "Z")
+                      if a != axis and a in sizes
+                      and abs(sizes[a] - value) <= FRAME_TOL_MM]
+            hint = (f" (the value {value} was found on "
+                    f"{', '.join(others)} instead)" if others else "")
+            errors.append(
+                f"extent {name} {value} mm must be on {axis} "
+                f"(measured {measured:.4f} mm on {axis}){hint}")
+    # Per-dimension extents, when a feature bbox is available.
+    feat_world = {}
+    if feature_bboxes:
+        for fname, feat in feature_bboxes.items():
+            wb = _world_effect_bbox(feat)
+            if wb is not None:
+                feat_world[fname] = wb
+    for dim in (frame_decl.get("dimensions") or []):
+        try:
+            value = float(dim["value"])
+            axis = dim["axis"]
+            fname = dim["feature"]
+        except (KeyError, TypeError, ValueError):
+            continue
+        wb = feat_world.get(fname)
+        if wb is None or axis not in wb:
+            measurements[f"dim_{dim.get('id', '?')}"] = {"skipped": True}
+            continue
+        lo, hi = wb[axis]
+        measured = hi - lo
+        measurements[f"dim_{dim.get('id', '?')}"] = {
+            "declared": value, "axis": axis, "feature": fname,
+            "measured": measured}
+        if abs(measured - value) > FRAME_TOL_MM:
+            errors.append(
+                f"dimension {dim.get('id', '?')} {value} mm on "
+                f"{axis} via {fname} (measured {measured:.4f} mm)")
+    # Datum contact: cumulative base bbox vs final bbox on the
+    # datum axis (default vertical Z). The clip must extend the
+    # base on exactly one side.
+    datum = frame_decl.get("datum") or {}
+    datum_feats = datum.get("features") or []
+    datum_axis = None
+    for key in ("vertical",):
+        if axes.get(key) in ("X", "Y", "Z"):
+            datum_axis = axes[key]
+    if len(datum_feats) >= 2 and feature_bboxes and datum_axis:
+        base_name = datum_feats[0]
+        base_cum = (feature_bboxes.get(base_name) or {}).get(
+            "cumulative_bbox")
+        if base_cum and datum_axis in sizes:
+            try:
+                bi = "XYZ".index(datum_axis)
+                blo, bhi = base_cum[bi]
+                flo, fhi = tess["tess_" + datum_axis.lower()]
+                measurements["datum"] = {
+                    "axis": datum_axis, "base": [blo, bhi],
+                    "final": [flo, fhi]}
+                extends_hi = fhi > bhi + FRAME_TOL_MM
+                extends_lo = flo < blo - FRAME_TOL_MM
+                same_lo = abs(flo - blo) <= FRAME_TOL_MM
+                same_hi = abs(fhi - bhi) <= FRAME_TOL_MM
+                if not ((extends_hi and same_lo) or
+                        (extends_lo and same_hi)):
+                    errors.append(
+                        f"datum contact on {datum_axis}: base "
+                        f"{base_name} spans {blo:.4f}..{bhi:.4f} but "
+                        f"the final solid spans {flo:.4f}..{fhi:.4f} "
+                        f"— the clip must extend the base on "
+                        f"exactly one side of the datum axis, not "
+                        f"both, neither, or a slab overlap")
+            except Exception:
+                pass
+    # Consistency warnings only (never gate failures): the axes
+    # must be a permutation, and the declared width should match
+    # the traced outline's width when both exist.
+    ax_vals = [axes.get(k) for k in ("horizontal", "depth", "vertical")]
+    if sorted([a for a in ax_vals if a]) != ["X", "Y", "Z"]:
+        warnings.append("frame axes are not a permutation of X/Y/Z")
+    return (not errors), errors, warnings, measurements
+
+
+def measure_feature_bboxes(freecadcmd, fcstd_path, output_dir):
+    """Per-feature geometry dump via frame_measure.py (freecadcmd).
+
+    Returns {feature_name: {...}} or None when the dump is missing
+    or carries an error. Same env-var pattern as read_features.py:
+    freecadcmd exits 0 even on errors, so the output file is the
+    only trustworthy signal. Best-effort: a failed dump only
+    skips the per-feature/datum checks, never fails the run.
+    """
+    script_dir = Path(__file__).resolve().parent
+    script = script_dir / "frame_measure.py"
+    if not script.is_file():
+        return None
+    out_path = output_dir / "frame_features.json"
+    log_path = output_dir / "frame_measure_log.txt"
+    env = dict(os.environ)
+    env["FCSTD_PATH"] = str(fcstd_path)
+    env["FEATURES_OUT"] = str(out_path)
+    try:
+        with open(log_path, "w", encoding="utf-8") as log_file:
+            subprocess.run([freecadcmd, str(script)],
+                           stdout=log_file, stderr=subprocess.STDOUT,
+                           env=env, timeout=600)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not out_path.is_file():
+        return None
+    try:
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if data.get("error"):
+        return None
+    return data.get("features")
+
+
+def merge_frame_dimensions(output_dir, frame_decl):
+    """Per-dimension frame entries: derived + user overrides.
+
+    Derived entries come from dimensions.json (D-rows) + the
+    macro's FEATURE_MAP (mapping.json, else macro.py): a row gets
+    an axis only from a coarse, visible category — front-view
+    width/height/thickness words map to the global horizontal/
+    vertical/depth axes, section/side/top thickness maps to the
+    depth axis, anything else stays unchecked (""). This is NOT
+    the declined width-pattern fix: it derives no VALUE, only
+    which of three axes a dimension sits on, it is shown in the
+    frame tab for correction, and it only activates a check when
+    a FEATURE is also known (from FEATURE_MAP, never from words).
+    A wrong derived axis fails visibly in the gate; it can never
+    silently mis-scale a trace. Stored entries the user set in
+    the tab (user_set) always win over derived axes; the merged
+    list is written back to frame.json dimensions so the tab
+    shows exactly what the gate checked.
+    """
+    axes = frame_decl.get("axes", {}) or {}
+    stored = {}
+    for d in (frame_decl.get("dimensions") or []):
+        if isinstance(d, dict) and d.get("id"):
+            stored[d["id"]] = d
+    dims = []
+    try:
+        raw = json.loads((Path(output_dir) / "dimensions.json")
+                         .read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            dims = raw
+    except Exception:
+        dims = []
+    mapping = {}
+    try:
+        raw_map = json.loads((Path(output_dir) / "mapping.json")
+                             .read_text(encoding="utf-8"))
+        if isinstance(raw_map, dict):
+            mapping = raw_map
+    except Exception:
+        mapping = {}
+    if not mapping:
+        try:
+            macro_text = (Path(output_dir) / "macro.py").read_text(
+                encoding="utf-8", errors="replace")
+            mapping, _warn = extract_feature_map(macro_text)
+        except Exception:
+            mapping = {}
+    merged = []
+    for d in dims:
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        if d.get("reference"):
+            continue
+        try:
+            value = float(d["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        view = (d.get("view") or "").lower()
+        label = (d.get("label") or "").lower()
+        axis = ""
+        if view == "front":
+            if re.search(r"width|폭|가로", label):
+                axis = axes.get("horizontal", "")
+            elif re.search(r"height|높이|세로", label):
+                axis = axes.get("vertical", "")
+            elif re.search(r"thick|depth|두께|깊이", label):
+                axis = axes.get("depth", "")
+        elif view in ("section", "side", "top"):
+            if re.search(r"thick|depth|두께|깊이", label):
+                axis = axes.get("depth", "")
+        entry = {"id": d["id"], "label": d.get("label", ""),
+                 "value": value, "axis": axis,
+                 "feature": (mapping.get(d["id"]) or {}).get("feature")}
+        st = stored.get(d["id"])
+        if st and st.get("user_set") and st.get("axis") in ("X", "Y", "Z"):
+            entry["axis"] = st["axis"]
+            entry["user_set"] = True
+        elif st and st.get("axis") in ("X", "Y", "Z") and not axis:
+            # Previously checked axis, now underivable (labels
+            # changed): keep it rather than silently unchecking.
+            entry["axis"] = st["axis"]
+        merged.append(entry)
+    for did, st in stored.items():
+        if did not in {e["id"] for e in merged} \
+                and st.get("axis") in ("X", "Y", "Z"):
+            # Stored check (e.g. hand-written in frame.json, or a
+            # row whose D-list is gone): keep it as-is; the gate
+            # skips entries without value/feature anyway.
+            merged.append(dict(st))
+    try:
+        frame_decl["dimensions"] = merged
+        (Path(output_dir) / "frame.json").write_text(
+            json.dumps(frame_decl, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+    except OSError:
+        pass
+    return merged
+
+
+def run_frame_gate(output_dir, freecadcmd, verification, step_path,
+                   log_fn):
+    """Frame gate after the other gates passed.
+
+    Returns (passed, error_text). Writes frame_check.json with the
+    measurements and verdict every time it runs. A user-disabled
+    gate (frame tab toggle) skips with a log line; missing
+    per-feature data skips only the per-feature/datum checks.
+    """
+    if frame_gate_off(output_dir):
+        log_fn("FRAME GATE OFF for this folder (user toggle); skipped")
+        return True, ""
+    frame_decl = load_frame_declaration(output_dir)
+    frame_decl["dimensions"] = merge_frame_dimensions(
+        output_dir, frame_decl)
+    need_features = bool((frame_decl.get("datum") or {}).get("features"))
+    if not need_features:
+        need_features = any(
+            isinstance(d, dict) and d.get("feature")
+            for d in (frame_decl.get("dimensions") or []))
+    feature_bboxes = None
+    if need_features:
+        fcstd_path = output_dir / "model.fcstd"
+        if fcstd_path.is_file():
+            feature_bboxes = measure_feature_bboxes(
+                freecadcmd, fcstd_path, output_dir)
+            if feature_bboxes is None:
+                log_fn("FRAME: per-feature dump unavailable; "
+                       "per-feature/datum checks skipped")
+    passed, errors, warnings, measurements = check_frame(
+        verification, frame_decl, feature_bboxes)
+    try:
+        step_mtime = Path(step_path).stat().st_mtime if step_path else None
+    except OSError:
+        step_mtime = None
+    (output_dir / "frame_check.json").write_text(
+        json.dumps({"passed": passed, "errors": errors,
+                    "warnings": warnings, "measurements": measurements,
+                    "frame_source": frame_decl.get("source", "default"),
+                    "step_mtime": step_mtime},
+                   indent=2, ensure_ascii=False), encoding="utf-8")
+    for warning in warnings:
+        log_fn(f"FRAME warning: {warning}")
+    if passed:
+        log_fn("FRAME GATE PASS")
+        return True, ""
+    log_fn("FRAME GATE FAIL: " + "; ".join(errors))
+    return False, "; ".join(errors)
+
+
+def run_check_frame_mode(output_dir, freecadcmd):
+    """Re-evaluate the frame check for the frame tab (no LLM call,
+    no rebuild, never a build failure — this is a report).
+
+    Fast path: when frame_check.json already holds measurements
+    for the current STEP (same mtime), re-evaluate them against
+    the (possibly edited) frame.json without touching FreeCAD.
+    Otherwise measure the STEP now (verify_step) and evaluate.
+    Returns 0 always, unless the folder has no STEP at all.
+    """
+    step_path = output_dir / "model.step"
+    if not step_path.is_file():
+        print("FRAME CHECK: no model.step in this folder; nothing "
+              "to measure. Edit the criterion in the tab first, "
+              "then build.")
+        return 0
+    frame_decl = load_frame_declaration(output_dir)
+    frame_decl["dimensions"] = merge_frame_dimensions(
+        output_dir, frame_decl)
+    stored = None
+    try:
+        stored = json.loads((output_dir / "frame_check.json")
+                            .read_text(encoding="utf-8"))
+    except Exception:
+        stored = None
+    try:
+        step_mtime = step_path.stat().st_mtime
+    except OSError:
+        step_mtime = None
+    verification = None
+    if stored and stored.get("step_mtime") == step_mtime:
+        # Fast path: measurements exist for this exact STEP. The
+        # stored tess tuples rebuild the exact verification shape
+        # (including the datum final bbox), so re-evaluation is
+        # exact without touching FreeCAD.
+        meas = stored.get("measurements") or {}
+        tess_stored = meas.get("tess") or {}
+        if tess_stored:
+            try:
+                verification = {
+                    "tess_x": tuple(tess_stored["X"]),
+                    "tess_y": tuple(tess_stored["Y"]),
+                    "tess_z": tuple(tess_stored["Z"]),
+                }
+            except Exception:
+                verification = None
+    if verification is None:
+        verification = verify_step(freecadcmd, step_path, output_dir)
+        if not verification.get("ok"):
+            print("FRAME CHECK: STEP verification failed "
+                  "(see verify.log).")
+            return 0
+    feature_bboxes = None
+    need_features = bool((frame_decl.get("datum") or {}).get("features"))
+    if not need_features:
+        need_features = any(
+            isinstance(d, dict) and d.get("feature")
+            for d in (frame_decl.get("dimensions") or []))
+    if need_features:
+        fcstd_path = output_dir / "model.fcstd"
+        if fcstd_path.is_file():
+            feature_bboxes = measure_feature_bboxes(
+                freecadcmd, fcstd_path, output_dir)
+    passed, errors, warnings, measurements = check_frame(
+        verification, frame_decl, feature_bboxes)
+    (output_dir / "frame_check.json").write_text(
+        json.dumps({"passed": passed, "errors": errors,
+                    "warnings": warnings, "measurements": measurements,
+                    "frame_source": frame_decl.get("source", "default"),
+                    "step_mtime": step_mtime},
+                   indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"FRAME CHECK: {'PASS' if passed else 'FAIL'}"
+          + (f" — {'; '.join(errors)}" if errors else ""))
+    for warning in warnings:
+        print(f"FRAME CHECK warning: {warning}")
+    return 0
+
+
+def save_build_sections(content, output_dir, drawing_path):
+    """View matching + dimensions + frame from a BUILD response.
+
+    Same extractors as ask-first (view matching section, numbered
+    dimensions + annotated drawing), plus the FRAME block into
+    frame.json. A section that is absent removes its stale file,
+    so a new response can never inherit an earlier run's table.
+    Never raises: section saving must not fail a build.
+    """
+    try:
+        vm_path = output_dir / "view_matching.txt"
+        vm = extract_view_matching(content)
+        if vm:
+            vm_path.write_text(vm + "\n", encoding="utf-8")
+        elif vm_path.is_file():
+            vm_path.unlink()
+    except OSError:
+        pass
+    try:
+        d_dims = parse_numbered_dimensions(content)
+        if d_dims:
+            (output_dir / "dimensions.json").write_text(
+                json.dumps(d_dims, indent=2, ensure_ascii=False),
+                encoding="utf-8")
+            try:
+                annotate_drawing(drawing_path, d_dims,
+                                 output_dir / "drawing_numbered.png")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        frame = extract_frame_block(content)
+        if frame:
+            save_frame_declaration(output_dir, frame, "build")
+    except Exception:
+        pass
+
+
 def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
-                   dry_run, outline_width_mm=None):
+                   dry_run, outline_width_mm=None, minimal=False):
     """Patch the existing macro.py in place — no regeneration.
 
     Why this mode exists (Oct 31, 2026 user instruction): a
@@ -4868,7 +5698,9 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
     # answer text, else from the drawing's front overall-width
     # dimension — instead of requiring the user to type it into
     # the width field when the drawing already gives it.
-    if outline_width_mm is None and not (
+    # Simple-fix mode skips this entirely: its prompt is macro +
+    # one instruction only, never a trace.
+    if not minimal and outline_width_mm is None and not (
             output_dir / "outline_points.json").is_file():
         _dw, _dw_src = derive_outline_width_mm(output_dir, text)
         if _dw is not None:
@@ -4883,7 +5715,7 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
     # it just leaves the previous text-only behaviour + a log
     # line). Without this, a Q0 confirmation that supplies the
     # width would still patch blind.
-    if outline_width_mm is not None and not (output_dir / "outline_points.json").is_file():
+    if not minimal and outline_width_mm is not None and not (output_dir / "outline_points.json").is_file():
         for _cand in sorted(output_dir.glob("input_outline.*")) + \
                 sorted(output_dir.glob("outline_input.*")):
             if _cand.suffix.lower() in (".png", ".jpg", ".jpeg",
@@ -4904,12 +5736,16 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                     _log(f"PATCH: outline trace skipped ({exc}); "
                          "continuing without traced points.")
                 break
+    # Whole-conversation rule (Nov 1, 2026): qa_history is read
+    # WHOLE here, never truncated to 8000 chars — the patch prompt
+    # below carries the whole folder record (which includes this
+    # history). This variable also feeds the answered-label logic.
     qa_text = ""
     qa_path = output_dir / "qa_history.txt"
     if qa_path.is_file():
         try:
             qa_text = qa_path.read_text(encoding="utf-8",
-                                        errors="replace")[-8000:]
+                                        errors="replace")
         except OSError:
             qa_text = ""
     # Answered-question resolution (Oct 31, 2026, CORRECTED same
@@ -4932,7 +5768,10 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
     # questions.txt and do not drive the banner.
     questions_path = output_dir / "questions.txt"
     question_dict = {}
-    if questions_path.is_file():
+    # Simple-fix does no question bookkeeping: with an empty
+    # question_dict the cleaning below returns the raw instruction
+    # and the answered set collapses to empty, so nothing prunes.
+    if not minimal and questions_path.is_file():
         try:
             question_dict = parse_q_lines(questions_path.read_text(
                 encoding="utf-8", errors="replace"))
@@ -4983,7 +5822,7 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
             _log(f"PATCH: questions.txt cleanup failed: {exc}")
     hist_text = ""
     hist_path = output_dir / "feature_history.json"
-    if hist_path.is_file():
+    if not minimal and hist_path.is_file():
         try:
             hist = json.loads(hist_path.read_text(encoding="utf-8"))
             fails = [f"{f['feature']} delta {f['delta']}"
@@ -4993,52 +5832,86 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
                          + ("; ".join(fails) if fails else "none"))
         except Exception:
             hist_text = ""
-    guidance_text = ""
-    guidance_path = output_dir / "guidance.txt"
-    if guidance_path.is_file():
-        try:
-            guidance_text = guidance_path.read_text(
-                encoding="utf-8", errors="replace")[:2000]
-        except OSError:
-            guidance_text = ""
-    prompt = (
-        "You are editing an EXISTING FreeCAD macro. Do NOT write a "
-        "new macro, do NOT regenerate the whole file, do NOT "
-        "reorder features, do NOT rename features, do NOT change "
-        "any dimension, direction, or sketch except what the "
-        "modification instructions below require. Chamfer/Fillet "
-        "stay LAST in the feature order. If a feature you change "
-        "is in FEATURE_MAP, keep the map entry and update only "
-        "its changed value.\n\n"
-        "Return ONLY one ```json code fence containing a list of "
-        "replacements, no other text:\n"
-        '[{"old": "<EXACT text copied from the macro, including '
-        'indentation>", "new": "<replacement text>"}]\n'
-        "Each \"old\" must occur exactly once in the macro; copy "
-        "enough surrounding lines to make it unique. Keep each "
-        "replacement as small as possible: one feature, one "
-        "direction flip, one value, one position — never the "
-        "whole file.\n"
-        "The instructions below are ANSWERS to questions, not new "
-        "questions. Apply them to the provisional values they "
-        "answer and do NOT re-ask them, do NOT leave them as "
-        "provisional values.\n\n"
-        f"Modification instructions:\n{cleaned_text}\n\n"
-        + (f"{hist_text}\n\n" if hist_text else "")
-        + (f"Previous guidance:\n{guidance_text}\n\n" if guidance_text else "")
-        + (f"Q&A history (user-confirmed; do not contradict it):\n"
-           f"{qa_text}\n\n" if qa_text.strip() else "")
-        + (f"Traced outline points (numeric — the outline "
-           f"feature's sketch MUST use these, see the section "
-           f"above for the copy rule):\n"
-           f"{format_outline_points_text(load_outline_points(output_dir))}\n\n"
-           if load_outline_points(output_dir) else "")
-        + "Existing macro.py:\n```python\n" + macro_text + "\n```\n"
-        + f"Save the patched model to {fcstd_path} and the STEP "
-        f"export to {step_path} (the macro already does this; "
-        f"do not change its output paths)."
-    )
-    (output_dir / "patch_prompt.txt").write_text(prompt, encoding="utf-8")
+    # NOTE: guidance.txt is deliberately NOT read for the prompt
+    # any more (Nov 1, 2026 whole-conversation rule): it is a
+    # derived summary, and patch mode never updates it, so it can
+    # be stale. The raw record below replaces it.
+    if minimal:
+        # Simple-fix prompt (Nov 1, 2026): macro + ONE instruction
+        # only. No conversation dump, no re-analysis, no outline
+        # image, no question bookkeeping. For a truly one-change
+        # fix; multi-feature changes go through the full patch.
+        prompt = (
+            "You are editing an EXISTING FreeCAD macro. Change "
+            "ONLY what the single instruction below requires — one "
+            "feature, one direction flip, one value, one position. "
+            "Do NOT re-derive the frame, do NOT re-analyse the "
+            "drawing, do NOT change any other dimension, direction, "
+            "or sketch. Chamfer/Fillet stay LAST in the feature "
+            "order. If a feature you change is in FEATURE_MAP, keep "
+            "the map entry and update only its changed value.\n\n"
+            "Return ONLY one ```json code fence containing a list of "
+            "replacements, no other text:\n"
+            '[{"old": "<EXACT text copied from the macro, including '
+            'indentation>", "new": "<replacement text>"}]\n'
+            "Each \"old\" must occur exactly once in the macro; copy "
+            "enough surrounding lines to make it unique.\n\n"
+            f"Instruction (change ONLY this):\n{text}\n\n"
+            + "Existing macro.py:\n```python\n" + macro_text + "\n```\n"
+            + f"Save the patched model to {fcstd_path} and the STEP "
+            f"export to {step_path} (the macro already does this; "
+            f"do not change its output paths)."
+        )
+        prompt_name = "simple_fix_prompt.txt"
+    else:
+        # Whole-conversation patch prompt (Nov 1, 2026 user rule):
+        # the folder's whole record unabridged (macro.py itself is
+        # excluded — it follows below as the edit target, so
+        # including it twice would only waste tokens). No
+        # guidance.txt (derived, possibly stale) and no
+        # matching.json (direction-blind report).
+        _folder_context = collect_folder_context(
+            output_dir, exclude_files={"macro.py"})
+        prompt = (
+            "You are editing an EXISTING FreeCAD macro. Do NOT write a "
+            "new macro, do NOT regenerate the whole file, do NOT "
+            "reorder features, do NOT rename features, do NOT change "
+            "any dimension, direction, or sketch except what the "
+            "modification instructions below require. Chamfer/Fillet "
+            "stay LAST in the feature order. If a feature you change "
+            "is in FEATURE_MAP, keep the map entry and update only "
+            "its changed value.\n\n"
+            "Return ONLY one ```json code fence containing a list of "
+            "replacements, no other text:\n"
+            '[{"old": "<EXACT text copied from the macro, including '
+            'indentation>", "new": "<replacement text>"}]\n'
+            "Each \"old\" must occur exactly once in the macro; copy "
+            "enough surrounding lines to make it unique. Keep each "
+            "replacement as small as possible: one feature, one "
+            "direction flip, one value, one position — never the "
+            "whole file.\n"
+            "The instructions below are ANSWERS to questions, not new "
+            "questions. Apply them to the provisional values they "
+            "answer and do NOT re-ask them, do NOT leave them as "
+            "provisional values.\n\n"
+            f"Modification instructions:\n{cleaned_text}\n\n"
+            + (f"{hist_text}\n\n" if hist_text else "")
+            + (f"Whole folder record (whole, unabridged — read it "
+               f"all; the answers and the conversation are in here, "
+               f"do not contradict them):\n{_folder_context}\n\n"
+               if _folder_context.strip() else "")
+            + (f"Traced outline points (numeric — the outline "
+               f"feature's sketch MUST use these, see the section "
+               f"above for the copy rule):\n"
+               f"{format_outline_points_text(load_outline_points(output_dir))}\n\n"
+               if load_outline_points(output_dir) else "")
+            + "Existing macro.py:\n```python\n" + macro_text + "\n```\n"
+            + f"Save the patched model to {fcstd_path} and the STEP "
+            f"export to {step_path} (the macro already does this; "
+            f"do not change its output paths)."
+        )
+        prompt_name = "patch_prompt.txt"
+    (output_dir / prompt_name).write_text(prompt, encoding="utf-8")
     # Patch resends the outline image — ONLY when the folder
     # carries one (Nov 1, 2026 user rule). Previously patch was
     # text-only, so after the second question round the patch
@@ -5047,26 +5920,28 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
     # outline image exists, the call stays text-only, exactly
     # as before. JSON outlines are not images and are not sent
     # (their numeric points, above, are the usable form).
+    # Simple-fix never resends it: macro + instruction only.
     _outline_image_patch = None
-    for _cand in sorted(output_dir.glob("input_outline.*")) + \
-            sorted(output_dir.glob("outline_input.*")):
-        if _cand.suffix.lower() in (".png", ".jpg", ".jpeg",
-                                    ".webp", ".bmp", ".gif"):
-            try:
-                _mime, _ = mimetypes.guess_type(str(_cand))
-                _outline_image_patch = (
-                    base64.b64encode(_cand.read_bytes()).decode("ascii"),
-                    _mime or "image/png")
-                _log(f"PATCH: outline image resent from {_cand.name}")
-            except Exception as exc:
-                # A broken outline file must never crash a patch:
-                # fall back to text-only and say so plainly.
-                _log(f"PATCH: outline image unreadable ({exc}); "
-                     "continuing text-only.")
-            break
+    if not minimal:
+        for _cand in sorted(output_dir.glob("input_outline.*")) + \
+                sorted(output_dir.glob("outline_input.*")):
+            if _cand.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                        ".webp", ".bmp", ".gif"):
+                try:
+                    _mime, _ = mimetypes.guess_type(str(_cand))
+                    _outline_image_patch = (
+                        base64.b64encode(_cand.read_bytes()).decode("ascii"),
+                        _mime or "image/png")
+                    _log(f"PATCH: outline image resent from {_cand.name}")
+                except Exception as exc:
+                    # A broken outline file must never crash a patch:
+                    # fall back to text-only and say so plainly.
+                    _log(f"PATCH: outline image unreadable ({exc}); "
+                         "continuing text-only.")
+                break
     if dry_run:
-        _log("PATCH DRY-RUN: prompt written to patch_prompt.txt, "
-             "no API call, no macro change")
+        _log(f"{'SIMPLE-FIX' if minimal else 'PATCH'} DRY-RUN: prompt "
+             f"written to {prompt_name}, no API call, no macro change")
         return _finish(0)
     api_key = os.environ.get("META_API_KEY") or load_dotenv_key()
     if not api_key:
@@ -5197,6 +6072,28 @@ def run_patch_mode(output_dir, freecadcmd, model, max_tokens, text,
             except Exception:
                 pass
             return _finish(1)
+    # Frame gate (Nov 1, 2026, same as the build loop): measured
+    # axes/datum, after the volume gate, before any PATCH COMPLETE
+    # claim. Simple-fix gets it too — minimal prompt, full
+    # verification.
+    _frame_ok, _frame_err = run_frame_gate(
+        output_dir, freecadcmd, verification, step_path,
+        lambda m: _log(f"PATCH: {m}"))
+    if not _frame_ok:
+        _log("PATCH FAIL: frame gate FAIL: " + _frame_err
+             + " (other gates passed — if the model looks right "
+             "in the viewer, the declared frame may be wrong; "
+             "see the Frame Check tab)")
+        try:
+            _n = ensure_matching_file(
+                output_dir, freecadcmd, macro_text=new_text,
+                verification=verification)
+            if _n > 0:
+                _log(f"PATCH: matching.json ensured ({_n} rows, "
+                     f"even on failure)")
+        except Exception:
+            pass
+        return _finish(1)
     # Fresh previews + feature tree after a patch, best-effort:
     # the result page must show the PATCHED model, not stale
     # images/tree from before the patch.
@@ -5282,8 +6179,12 @@ def parse_args(argv=None):
                         help="Gear reference file, used ONLY with --gear.")
     parser.add_argument("--output-dir", required=True,
                         help="Directory for ALL orchestrator outputs.")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"Meta model (default: {DEFAULT_MODEL}).")
+    parser.add_argument("--model", default=None,
+                        help="Meta model. When omitted, the folder's "
+                        "model.txt wins (a folder keeps the model it "
+                        "started with); otherwise the default "
+                        f"{DEFAULT_MODEL}. The web UI offers exactly "
+                        "two models (standard / contributor).")
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
                         help=f"Max tokens (default: {DEFAULT_MAX_TOKENS}).")
     parser.add_argument("--freecadcmd", default="freecadcmd",
@@ -5370,6 +6271,31 @@ def parse_args(argv=None):
                         "from the current .fcstd + STEP. No API "
                         "call, no macro/model/report change; "
                         "measured columns are preserved by D-number.")
+    parser.add_argument("--simple-fix", action="store_true",
+                        help="Simple-fix button (web UI): like --patch "
+                        "but MINIMAL — the prompt carries ONLY the "
+                        "current macro.py + the one-line instruction "
+                        "(no conversation dump, no re-analysis, no "
+                        "outline image, no question pruning). For a "
+                        "truly one-change fix only; multi-feature "
+                        "changes go through the whole-conversation "
+                        "patch. Full verification (STEP + feature "
+                        "gate + frame gate) still applies. Needs "
+                        "only --output-dir (+ --freecadcmd) and "
+                        "--text. With --dry-run it writes "
+                        "simple_fix_prompt.txt and calls no API.")
+    parser.add_argument("--check-frame", action="store_true",
+                        help="Frame-check tab support (web UI): "
+                        "re-evaluate the frame check for an existing "
+                        "folder against its current frame.json "
+                        "(possibly edited in the tab) and write "
+                        "frame_check.json. No LLM call, no rebuild, "
+                        "never a build failure — this is a report. "
+                        "When frame_check.json already holds "
+                        "measurements for the current STEP it "
+                        "re-evaluates without touching FreeCAD; "
+                        "otherwise it measures the STEP now. Needs "
+                        "only --output-dir (+ --freecadcmd).")
     parser.add_argument("--patch", action="store_true",
                         help="Patch an existing result folder's macro.py "
                         "in place instead of regenerating it: one "
@@ -5402,6 +6328,24 @@ def main(argv=None):
     args = parse_args(argv)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Model resolution (Nov 1, 2026: web UI dropdown, a folder
+    # keeps the model it started with): explicit --model wins,
+    # else the folder's model.txt, else the default. Written back
+    # so the folder records the model every LLM mode used. No-API
+    # modes (measure/inspect/build-table/images/trace/check-frame)
+    # never touch it.
+    _no_api_mode = (args.measure or args.inspect or args.build_table
+                    or args.images or args.trace_outline
+                    or args.check_frame)
+    if not _no_api_mode:
+        args.model = resolve_model(args.model, output_dir)
+        try:
+            _mt = output_dir / "model.txt"
+            if not _mt.is_file() or _mt.read_text(
+                    encoding="utf-8").strip() != args.model:
+                _mt.write_text(args.model + "\n", encoding="utf-8")
+        except OSError:
+            pass
     if args.measure:
         return run_measure_mode(output_dir, args.freecadcmd)
     if args.inspect:
@@ -5423,6 +6367,13 @@ def main(argv=None):
         return run_patch_mode(output_dir, args.freecadcmd, args.model,
                               args.max_tokens, args.text, args.dry_run,
                               outline_width_mm=args.outline_width_mm)
+    if args.simple_fix:
+        return run_patch_mode(output_dir, args.freecadcmd, args.model,
+                              args.max_tokens, args.text, args.dry_run,
+                              outline_width_mm=args.outline_width_mm,
+                              minimal=True)
+    if args.check_frame:
+        return run_check_frame_mode(output_dir, args.freecadcmd)
     if args.images:
         return run_images_mode(output_dir, args.freecadcmd)
     if not args.drawing:
@@ -5622,60 +6573,73 @@ def main(argv=None):
             report_lines.append(
                 f"Outline trace: skipped ({exc}); continuing with "
                 "the outline image only.")
-    # Outline-width auto-derivation (Nov 1, 2026 user rule): when
-    # an outline image exists but no traced points yet, the program
-    # derives the width itself — from the answer/instruction text,
-    # else from the drawing's own front overall-width dimension —
-    # and traces NOW, so the build prompt carries points. The user
-    # is never told to type the width by hand when the drawing
-    # already gives it.
-    if outline_image is not None and outline_points_data is None:
-        _dw, _dw_src = derive_outline_width_mm(output_dir, args.text)
-        if _dw is not None:
+    # Outline width, build-first (Nov 1, 2026 user direction):
+    # the width is NEVER regex-derived from label wording on a
+    # fresh build (that pattern fix was declined as bracket-only
+    # evidence). Two legitimate sources remain: (1) a width the
+    # user gave with this run, (2) a width the LLM already
+    # declared visually in this folder's frame.json (from an
+    # ask-first view matching in the same folder). With either,
+    # trace NOW so the build prompt carries exact points. With
+    # neither, a fresh build does NOT stop here any more: it
+    # goes into placeholder mode (see below) — the build call
+    # itself declares the width visually, and the pipeline traces
+    # after the response. A build on provisional rectangles is
+    # still impossible: the placeholder macro cannot run without
+    # traced points, and a missing width declaration stops the
+    # run with the single Q0 width question AFTER the response.
+    # Ask-first is exempt throughout (it produces the dimensions
+    # and the frame declaration the later build uses).
+    outline_placeholder_mode = False
+    if outline_image is not None and outline_points_data is None \
+            and not args.ask_first:
+        _frame_w = None
+        try:
+            _frame_decl = load_frame_declaration(output_dir)
+            _ext = (_frame_decl.get("extents") or {}).get("width") or {}
+            _frame_w = float(_ext["value"]) if _ext.get("value") else None
+        except Exception:
+            _frame_w = None
+        if _frame_w is not None:
             try:
                 if run_trace_outline_mode(output_dir, args.freecadcmd,
-                                          outline_path, _dw) == 0:
+                                          outline_path, _frame_w) == 0:
                     outline_points_data = load_outline_points(output_dir)
                     report_lines.append(
-                        f"Outline width auto-derived ({_dw} mm from "
-                        f"{_dw_src}); traced to outline_points.json")
+                        f"Outline width from this folder's frame "
+                        f"declaration ({_frame_w} mm); traced to "
+                        f"outline_points.json")
                 else:
+                    (output_dir / "guidance.txt").write_text(
+                        "OUTLINE TRACE FAILED: an outline image is "
+                        "attached and this folder's frame declares "
+                        f"width {_frame_w} mm, but tracing failed "
+                        "(see trace_log.txt). Fix the outline image "
+                        "and retry; no model was built.\n",
+                        encoding="utf-8")
                     report_lines.append(
-                        "Outline trace: auto-derived width FAILED "
-                        "(see trace_log.txt); continuing image-only.")
+                        "RESULT: FAIL - outline trace failed, see "
+                        "trace_log.txt")
+                    write_report(output_dir / "report.txt", report_lines)
+                    print("\n".join(report_lines))
+                    return 1
             except Exception as exc:
                 report_lines.append(
                     f"Outline trace: skipped ({exc}); continuing "
                     "with the outline image only.")
-    # Trace gate (Nov 1, 2026 user rule): with an outline image
-    # and still no traced points, do NOT start a build on
-    # provisional rectangles. Stop with the single width question
-    # instead — no API credit is spent on a build whose primary
-    # shape source is missing. Ask-first and dry-run are exempt:
-    # ask-first produces the dimensions the derivation needs, and
-    # a missing freecadcmd is reported by its own check below.
-    _fc_ok = (shutil.which(args.freecadcmd) is not None
-              or Path(args.freecadcmd).is_file())
-    if (outline_image is not None and outline_points_data is None
-            and not args.ask_first and not args.dry_run and _fc_ok):
-        write_questions(output_dir, [(
-            "Q0", "Outline real width in mm is needed to trace the "
-                  "outline to exact points (it could not be derived "
-                  "from the drawing dimensions). Give the width in "
-                  "mm.")])
-        (output_dir / "guidance.txt").write_text(
-            "OUTLINE WIDTH NEEDED: an outline image is attached but "
-            "no traced points exist and no width could be derived "
-            "from the drawing dimensions. The build was NOT started, "
-            "so no provisional rectangle was built. Answer Q0 with "
-            "the width in mm and continue; the patch traces first.\n",
-            encoding="utf-8")
-        report_lines.append(
-            "RESULT: OUTLINE WIDTH NEEDED (build not started, "
-            "single Q0 width question, no API build call)")
-        write_report(output_dir / "report.txt", report_lines)
-        print("\n".join(report_lines))
-        return 1
+        else:
+            # Placeholder mode: the build response declares the
+            # width and carries the placeholder; the pipeline
+            # traces + replaces after the response (see the build
+            # loop). The placeholder instruction rides in
+            # outline_text so every prompt of this run has it.
+            outline_placeholder_mode = True
+            outline_text = (outline_text + "\n\n" + PLACEHOLDER_INSTRUCTION
+                            if outline_text else PLACEHOLDER_INSTRUCTION)
+            report_lines.append(
+                "Outline: placeholder mode (build declares the "
+                "width visually; traced points are inserted after "
+                "the response)")
     _points_text = format_outline_points_text(outline_points_data)
     if _points_text:
         outline_text = (outline_text + "\n\n" + _points_text
@@ -5718,6 +6682,17 @@ def main(argv=None):
             base_prompt += ("\n\n" + outline_proposal_instruction(
                 outline_points_data is not None))
         report_lines.append("Mode: ASK-FIRST - questions only, no model yet.")
+    if not args.ask_first:
+        # Build-first (Nov 1, 2026 user direction): the build
+        # response carries view matching + dimensions + frame +
+        # uncertain items, so questions come only after the draft
+        # exists. This format section rides on the base prompt
+        # AND on every retry prompt (the loop rebuilds from
+        # build_prompt + outline_text, then appends it again).
+        base_prompt += "\n\n" + BUILD_FIRST_RESPONSE_FORMAT
+        report_lines.append(
+            "Mode: BUILD-FIRST - macro + view matching + dimensions "
+            "+ frame + uncertain items, questions after the draft.")
     report_lines.append(f"Drawing: {drawing_path}")
     report_lines.append(f"Principles: {args.principles}")
     report_lines.append(f"Model: {args.model}, max_tokens: {args.max_tokens}")
@@ -5810,6 +6785,19 @@ def main(argv=None):
                 _vm_path.unlink()
         except OSError:
             pass
+        # Frame declaration from the ask-first view matching, so
+        # the later build (and the frame tab) already has a
+        # declared frame before any model exists. A user-edited
+        # frame.json is never overwritten (see
+        # save_frame_declaration).
+        try:
+            _frame = extract_frame_block(content)
+            if _frame and save_frame_declaration(output_dir, _frame,
+                                                 "ask-first"):
+                report_lines.append(
+                    "Frame declaration: see frame.json.")
+        except Exception:
+            pass
         questions = normalize_ask_questions(extract_questions(content, ""))
         # Numbered dimensions: D1... with approximate positions,
         # saved for the web UI matching tab (numbered drawing +
@@ -5886,6 +6874,7 @@ def main(argv=None):
     prev_verification = None
     prev_feature_history = []
     prev_ran = False
+    prev_frame_sig = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         append_log(self_fix_log,
                    f"Attempt {attempt}/{MAX_ATTEMPTS} started.")
@@ -5915,14 +6904,35 @@ def main(argv=None):
             retry_prompt = build_prompt(
                 principles_text, gear_text, args.text, output_dir,
                 outline_text, reference_text=reference_text)
+            # Build-first format rides on every retry too, so a
+            # regenerated macro still carries view matching,
+            # dimensions, frame, and uncertain items.
+            retry_prompt += "\n\n" + BUILD_FIRST_RESPONSE_FORMAT
             _hist_text = (feature_history_report(prev_feature_history)
                           if prev_feature_history else
                           "no CHECK lines recorded")
+            # Whole-conversation retry (Nov 1, 2026 user rule):
+            # the retry prompt carries the folder's WHOLE record
+            # unabridged, plus verbatim solver lines and measured
+            # numbers — never a distilled cause hypothesis. The
+            # diagnosis report stays in self_fix_log.txt (already
+            # logged above) and in the final guidance, not here:
+            # summarisation is itself a failure point.
+            _folder_context = collect_folder_context(output_dir)
+            _solver = last_diagnosis.get("solver_lines") or ""
+            _verif_text = (f"verification: {prev_verification}"
+                           if prev_verification else
+                           "no verification yet")
             prompt_text = (
                 retry_prompt
+                + "\n\nWhole folder record (whole, unabridged — "
+                + "read it all; no summary below replaces it):\n"
+                + _folder_context
                 + "\n\nPrevious attempt failed with this exact error:\n"
                 + last_error
-                + "\n" + last_diagnosis["report"]
+                + ("\nSolver/wire lines (verbatim from log):\n" + _solver
+                   if _solver else "")
+                + "\n" + _verif_text
                 + "\nFeature history (pipeline-measured from CHECK "
                 + "volumes, not the LLM's own PASS claims):\n"
                 + _hist_text
@@ -6007,6 +7017,85 @@ def main(argv=None):
             append_log(self_fix_log,
                        f"Attempt {attempt}: {last_error}")
             continue
+        # Build-first sections from THIS response (view matching,
+        # dimensions, frame) — saved before any FreeCAD run, so
+        # the frame tab has a declaration even if the build fails.
+        save_build_sections(content, output_dir, drawing_path)
+        # Placeholder mode: the build response declares the width
+        # visually; trace NOW and insert the exact points. A macro
+        # with an unreplaced placeholder must never be saved as
+        # macro.py (a later patch would build on it).
+        if outline_placeholder_mode:
+            _decl_w = parse_outline_width_declaration(content)
+            if _decl_w is None:
+                write_questions(output_dir, [("Q0", WIDTH_Q_TEXT)])
+                (output_dir / "guidance.txt").write_text(
+                    "OUTLINE WIDTH NEEDED: an outline image is "
+                    "attached but the build response declared no "
+                    "outline width, so no traced points exist and "
+                    "no model was built. Answer Q0 with the width "
+                    "in mm and continue; the build then traces "
+                    "first.\n",
+                    encoding="utf-8")
+                report_lines.append(
+                    "RESULT: OUTLINE WIDTH NEEDED (build response "
+                    "declared no width, single Q0 width question, "
+                    "no FreeCAD run)")
+                write_report(output_dir / "report.txt", report_lines)
+                print("\n".join(report_lines))
+                return 1
+            try:
+                _tr = run_trace_outline_mode(
+                    output_dir, args.freecadcmd, outline_path, _decl_w)
+            except Exception as exc:
+                _tr = -1
+                report_lines.append(
+                    f"Outline trace: skipped ({exc}).")
+            if _tr != 0:
+                (output_dir / "guidance.txt").write_text(
+                    "OUTLINE TRACE FAILED: the build declared width "
+                    f"{_decl_w} mm, but tracing failed (see "
+                    "trace_log.txt). Fix the outline image and "
+                    "retry; no model was built.\n",
+                    encoding="utf-8")
+                report_lines.append(
+                    "RESULT: FAIL - outline trace failed, see "
+                    "trace_log.txt")
+                write_report(output_dir / "report.txt", report_lines)
+                print("\n".join(report_lines))
+                return 1
+            outline_points_data = load_outline_points(output_dir)
+            if OUTLINE_PLACEHOLDER not in macro_text:
+                last_error = (
+                    "Outline placeholder __OUTLINE_POINTS__ missing "
+                    "from the macro: the outline sketch must use "
+                    "PTS = __OUTLINE_POINTS__ exactly, never "
+                    "hand-written coordinates.")
+                append_log(self_fix_log,
+                           f"Attempt {attempt}: {last_error}")
+                continue
+            _pts = (outline_points_data or {}).get("points_mm") or []
+            _pts_literal = repr([(float(x), float(y)) for x, y in _pts])
+            macro_text = macro_text.replace(OUTLINE_PLACEHOLDER,
+                                            _pts_literal)
+            # The frame's declared width is this run's declaration
+            # (unless the user edited the frame in the tab, which
+            # always wins — then a mismatch fails visibly in the
+            # frame gate instead of being silently overwritten).
+            try:
+                _fdecl = load_frame_declaration(output_dir)
+                if not _fdecl.get("user_edited"):
+                    _fdecl.setdefault("extents", {})["width"] = {
+                        "value": _decl_w, "axis":
+                        _fdecl.get("axes", {}).get("horizontal", "X")}
+                    (output_dir / "frame.json").write_text(
+                        json.dumps(_fdecl, indent=2, ensure_ascii=False),
+                        encoding="utf-8")
+            except Exception:
+                pass
+            report_lines.append(
+                f"Outline: traced at declared width {_decl_w} mm "
+                f"({len(_pts)} points), placeholder replaced")
         macro_path = output_dir / "macro.py"
         macro_path.write_text(macro_text, encoding="utf-8")
         (output_dir / f"macro_attempt{attempt}.py").write_text(macro_text, encoding="utf-8")
@@ -6035,6 +7124,22 @@ def main(argv=None):
                     encoding="utf-8", errors="replace"))
         except OSError:
             pass
+        # Build-first uncertain items: the draft's own undecided
+        # list joins the macro-comment questions, then the same
+        # reflection-first dedup + stable-ID pipeline runs on the
+        # merged list. Fresh labels continue past the highest
+        # existing label (a fresh folder starts at Q0).
+        _unc = extract_uncertain(content)
+        if _unc:
+            _max = 0
+            for _lbl in list(_existing_q) + [q[0] for q in questions]:
+                _m = re.match(r"Q(\d+)", _lbl or "")
+                if _m:
+                    _max = max(_max, int(_m.group(1)))
+            for _i, _item in enumerate(_unc):
+                questions.append((f"Q{_max + 1 + _i}", _item))
+            report_lines.append(
+                f"Uncertain items from draft: {len(_unc)}")
         questions = filter_build_questions(
             questions, _qa_text, macro_text, answer_text=args.text)
         questions = stabilize_question_ids(
@@ -6188,6 +7293,40 @@ def main(argv=None):
                            f"Attempt {attempt}: {last_error}")
                 continue
 
+        # Frame gate (Nov 1, 2026): whole-part axes + per-dimension
+        # axes + datum contact, MEASURED from the STEP/.fcstd —
+        # never from parameters or "Confirmed" notes. Runs after
+        # the volume gate, before any MODELING COMPLETE claim.
+        _frame_ok, _frame_err = run_frame_gate(
+            output_dir, args.freecadcmd, verification, step_path,
+            lambda m: append_log(
+                self_fix_log, f"Attempt {attempt}: {m}"))
+        if not _frame_ok:
+            # Loop cap (criterion safeguard): the SAME frame error
+            # twice means the declared frame may be wrong, not the
+            # model — stop instead of burning all 4 attempts on a
+            # wrong criterion. The final guidance below carries
+            # this message and points at the Frame Check tab.
+            if _frame_err and _frame_err == prev_frame_sig:
+                last_error = (
+                    "FRAME GATE REPEATED (same axis/datum errors "
+                    "twice): the declared frame itself may be "
+                    "wrong — check the Frame Check tab, correct "
+                    "the criterion there, and continue; do not "
+                    "keep rebuilding to a wrong frame. Errors: "
+                    + _frame_err)
+                append_log(self_fix_log,
+                           f"Attempt {attempt}: {last_error}")
+                break
+            prev_frame_sig = _frame_err
+            last_error = (
+                "FRAME GATE FAIL (other gates passed — if the model "
+                "looks right in the viewer, the declared frame may "
+                "be wrong; see the Frame Check tab): " + _frame_err)
+            append_log(self_fix_log,
+                       f"Attempt {attempt}: {last_error}")
+            continue
+
         # MODELING COMPLETE (not "success"): the only gate passed
         # here is solids == 1 and valid True on the STEP file.
         # Volume is reference only, never a gate. Drawing-vs-modeling
@@ -6305,19 +7444,22 @@ def main(argv=None):
         print("\n".join(report_lines))
         return 0
 
-    # 4th failure: STOP, guide, do NOT run a 5th time.
+    # Loop end: STOP, guide, do NOT run again. The loop variable
+    # holds the attempt that ended it (4 on a full run, fewer on
+    # an early frame-repeat break), so the guidance states the
+    # actual count instead of always claiming 4.
     final_diagnosis = build_diagnosis(
         prev_run_log_text, prev_verification, last_error, fcstd_path)
     guidance = (
-        "GUIDANCE (4th failure, stopped - no 5th run):\n"
+        f"GUIDANCE (stopped after {attempt} attempt(s)):\n"
         f"Feature/geometry: {last_feature}\n"
         f"Exact error: {last_error}\n"
         "Cause hypothesis: see self_fix_log.txt for the per-attempt "
         "errors; the last error above is the current cause.\n"
         f"{final_diagnosis['report']}\n"
-        "What was tried: 4 attempts total (first generation + up to "
-        "3 regenerations with the exact error, diagnosis, and "
-        "matched reference fed back). "
+        f"What was tried: {attempt} attempt(s) total (first "
+        "generation + regenerations with the whole folder record, "
+        "exact errors, and matched references fed back). "
         "See self_fix_log.txt.\n"
         "Question/alternative: fix the error above in the macro, or "
         "answer the design question if the error is a missing or "
@@ -6336,7 +7478,7 @@ def main(argv=None):
                 f"even on failure)")
     except Exception:
         pass
-    report_lines.append("RESULT: FAIL - 4th failure, see guidance.txt")
+    report_lines.append("RESULT: FAIL - see guidance.txt")
     write_report(output_dir / "report.txt", report_lines)
     print(guidance)
     return 1

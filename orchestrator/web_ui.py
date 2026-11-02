@@ -408,6 +408,70 @@ S = {
     "tab_params": ("Parameters & 3D", "파라미터 & 3D"),
     "tab_export": ("FreeCAD export", "FreeCAD 내보내기"),
     "tab_qa": ("QA log", "QA 로그"),
+    "tab_frame": ("Frame check", "프레임 검사"),
+    "folder_model": ("Model for this folder", "이 폴더의 모델"),
+    "simple_fix_title": ("Simple fix (one change only)",
+                          "단순 수정 (한 가지만 변경)"),
+    "simple_fix_note": ("Sends ONLY the current macro + this one "
+                        "instruction — no whole-conversation "
+                        "re-analysis. Full verification (whole STEP "
+                        "check + feature gate) still applies.",
+                        "현재 매크로 + 이 지시문 하나만 보냅니다 — 대화 "
+                        "전체를 다시 분석하지 않습니다. 전체 검증(STEP "
+                        "전체 검사 + 피처 게이트)은 그대로 적용됩니다."),
+    "simple_fix_label": ("One-line instruction", "한 줄 지시문"),
+    "simple_fix_btn": ("Simple fix", "단순 수정"),
+    "err_simple_fix_empty": ("Write one simple-fix instruction.",
+                             "단순 수정 지시문을 한 줄 쓰세요."),
+    "err_simple_fix_failed": ("Simple fix failed. See "
+                              "web_ui_simple_fix.log and patch_log.txt "
+                              "in the folder. The macro was not "
+                              "partially changed.",
+                              "단순 수정에 실패했습니다. 폴더의 "
+                              "web_ui_simple_fix.log와 patch_log.txt를 "
+                              "보세요. 매크로는 반만 바뀌지 않았습니다."),
+    "frame_criterion_title": ("Frame criterion", "프레임 기준"),
+    "frame_default_note": ("Default criterion (no frame.json in this "
+                           "folder yet).",
+                           "기본 기준 (이 폴더에 frame.json이 아직 "
+                           "없습니다)."),
+    "frame_results_title": ("Check results", "검사 결과"),
+    "frame_not_measured": ("Not measured yet — run a build, or save "
+                           "the criterion to check.",
+                           "아직 측정되지 않았습니다 — 빌드를 하거나 "
+                           "기준을 저장하면 검사합니다."),
+    "frame_previews_none": ("No model previews in this folder yet.",
+                            "이 폴더에 모델 프리뷰가 아직 없습니다."),
+    "frame_edit_title": ("Edit criterion", "기준 수정"),
+    "frame_axis_front": ("Front-horizontal axis", "정면 가로 축"),
+    "frame_axis_depth": ("Depth axis", "깊이 축"),
+    "frame_axis_vertical": ("Vertical axis", "세로 축"),
+    "frame_datum": ("Datum description", "기준면 설명"),
+    "frame_dim_axis": ("Declared axis per dimension",
+                       "치수별 선언 축"),
+    "frame_gate_off": ("Turn the frame gate off for this folder",
+                       "이 폴더의 프레임 게이트 끄기"),
+    "frame_datum_features": ("Datum features, comma-separated (the "
+                             "two features meeting at the datum)",
+                             "기준면에서 만나는 피처 (쉼표로 구분)"),
+    "frame_extent_width": ("Overall width (mm)", "전체 폭 (mm)"),
+    "frame_extent_depth": ("Overall depth (mm)", "전체 깊이 (mm)"),
+    "frame_extent_height": ("Overall height (mm)", "전체 높이 (mm)"),
+    "frame_save_btn": ("Save criterion + re-check",
+                       "기준 저장 + 다시 검사"),
+    "frame_edit_note": ("Saving stores the criterion in this folder "
+                        "and re-runs ONLY the check (no LLM call, no "
+                        "rebuild). The next build/patch uses the "
+                        "corrected criterion.",
+                        "저장하면 기준이 이 폴더에 저장되고 검사만 다시 "
+                        "돌아갑니다 (LLM 호출 없음, 재빌드 없음). 다음 "
+                        "빌드/패치는 고친 기준을 씁니다."),
+    "err_frame_failed": ("Frame re-check failed. See "
+                         "web_ui_frame_check.log in the folder. The "
+                         "criterion was still saved.",
+                         "프레임 재검사에 실패했습니다. 폴더의 "
+                         "web_ui_frame_check.log를 보세요. 기준은 "
+                         "저장됐습니다."),
     "input_title": ("Original / input images",
                     "원본 / 입력 이미지"),
     "input_note": ("Shows <code>input_drawing.*</code> / "
@@ -719,6 +783,31 @@ def freecadcmd_found(value):
     return shutil.which(value) is not None
 
 
+# ---- Model selection (Nov 1, 2026 user rule): the model is NOT
+# hardcoded. The run form offers exactly these two; a folder keeps
+# the model it started with in model.txt. Same API key for both —
+# only the model id changes. Default is standard: training use
+# must be opt-in, never imposed on someone who downloads the repo.
+MODEL_STANDARD = "muse-spark-1.3"
+MODEL_CONTRIBUTOR = "muse-spark-1.3-contributor"
+MODEL_CHOICES = (MODEL_STANDARD, MODEL_CONTRIBUTOR)
+
+
+def valid_model(value):
+    """Return value if it is one of the two offered models, else standard."""
+    return value if value in MODEL_CHOICES else MODEL_STANDARD
+
+
+def folder_model(output_dir):
+    """The model a folder runs with: model.txt when present, else standard."""
+    try:
+        text = (output_dir / "model.txt").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    return valid_model(text) if text else MODEL_STANDARD
+
+
 def page(title, body, lang="en"):
     return (
         f"<!DOCTYPE html><html lang=\"{lang}\"><head><meta charset=\"utf-8\">"
@@ -761,9 +850,15 @@ def form_page_ko():
     <p class="note">기본값이면 실행 시각이 붙은 폴더(예: my_run_output_20261030_090411)로 자동 생성돼 예전 결과가 덮어씌워지지 않습니다. 이미 결과가 있는 폴더를 지정하면 시각이 붙은 형제 폴더로 바뀝니다.</p>
     <label for="freecadcmd">freecadcmd</label>
     <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
+    <label for="model">모델</label>
+    <select id="model" name="model">
+    <option value="muse-spark-1.3" selected>Standard — 학습에 사용 안 함, 비쌈</option>
+    <option value="muse-spark-1.3-contributor">Contributor — 쌈, 학습에 쓰일 수 있음</option>
+    </select>
+    <p class="note">Standard는 프롬프트를 학습에 쓰지 않고 비싸고, Contributor는 싸지만 프롬프트가 학습에 쓰일 수 있습니다. 같은 API 키로 모델 이름만 바뀝니다.</p>
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (프롬프트 조립만 확인)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> 기어 부품 (체크 시에만 기어 참조 포함)</label>
-    <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> 질문 먼저 (답하기 전에는 모델을 만들지 않음)</label>
+    <label><input type="checkbox" name="ask_first" value="on" style="width:auto;"> 질문 먼저 (답하기 전에는 모델을 만들지 않음)</label>
     <p class="note">새 작업은 해당 폴더의 내용(도면·윤곽·답변)만 봅니다. 이전 폴더의 질문·답변은 가져오지 않습니다.</p>
     <label for="api_key">Meta API 키</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
@@ -904,9 +999,15 @@ def form_page_en():
     <p class="note">With the default, a timestamped folder is made automatically (e.g. my_run_output_20261030_090411), so old results are never overwritten. If you name a folder that already holds a result, a timestamped sibling folder is used instead.</p>
     <label for="freecadcmd">freecadcmd</label>
     <input type="text" id="freecadcmd" name="freecadcmd" value="freecadcmd">
+    <label for="model">Model</label>
+    <select id="model" name="model">
+    <option value="muse-spark-1.3" selected>Standard — no training use, pricier</option>
+    <option value="muse-spark-1.3-contributor">Contributor — cheaper, may be used for training</option>
+    </select>
+    <p class="note">Standard costs more and never trains on your prompts; Contributor is cheaper but Meta may use prompts for training. Same API key — only the model name changes.</p>
     <label><input type="checkbox" name="dry_run" value="on" style="width:auto;"> dry-run (assemble the prompt only)</label>
     <label><input type="checkbox" name="gear" value="on" style="width:auto;"> Gear part (gear reference included only when checked)</label>
-    <label><input type="checkbox" name="ask_first" value="on" checked style="width:auto;"> Ask questions first (no model until you answer)</label>
+    <label><input type="checkbox" name="ask_first" value="on" style="width:auto;"> Ask questions first (no model until you answer)</label>
     <p class="note">A new run looks only at its own folder's contents (drawing, outline, answers). Questions and answers from previous folders are never carried over.</p>
     <label for="api_key">Meta API key</label>
     <input type="password" id="api_key" name="api_key" autocomplete="off">
@@ -1584,7 +1685,7 @@ def prune_answered_questions(output_dir, require_text_match=True):
 
 
 def result_page(output_dir, returncode, stdout_tail="", lang="en",
-                draft_answers=None, draft_notes=None):
+                draft_answers=None, draft_notes=None, active_tab=None):
     # Dashboard-style result (mp3d Tab 1/2/3/4 look): status banner +
     # tabbed cards for input images, 3D previews, files/downloads, QA logs.
     # Nov 1, 2026 (user: a separate draft page was confusing — was
@@ -1771,8 +1872,9 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
             f"<p>{tr(lang, 'suggest_filled')}</p>{_notes_block}</div>")
     # With a draft, open the Q&A tab (where the answer box lives)
     # instead of the default drawing tab, so the filled box is
-    # what the user sees first.
-    _active_tab = "r4" if draft_answers else "r1"
+    # what the user sees first. /frame-check passes active_tab
+    # explicitly so the result reopens on the frame tab.
+    _active_tab = active_tab or ("r4" if draft_answers else "r1")
     gear_checked = ("checked" if "Gear reference: included"
                     in report_text else "")
     dir_query = html.escape(str(output_dir), quote=True)
@@ -1808,6 +1910,26 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       <button type="submit">{tr(lang, 'continue_button')}</button>
       <p class="note">{tr(lang, 'continue_button_note')}</p>
       {'<button type="submit" formaction="/suggest" formmethod="post">' + tr(lang, 'suggest_btn') + '</button><p class="note">' + tr(lang, 'suggest_note') + '</p>' if questions_valid else ''}
+      </form></div>"""
+
+    # Simple-fix form (Nov 1, 2026 user rule): one instruction,
+    # macro + instruction only — no whole-conversation
+    # re-analysis. Sits next to the Continue form; full
+    # verification still applies inside the pipeline run.
+    simple_fix_form = f"""
+      <div class="card"><h3>🔧 {tr(lang, 'simple_fix_title')}</h3>
+      <p class="note">{tr(lang, 'simple_fix_note')}</p>
+      <form action="/simple-fix" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="dir" value="{dir_query}">
+      <input type="hidden" name="lang" value="{lang}">
+      <label for="simple_instruction">{tr(lang, 'simple_fix_label')}</label>
+      <input type="text" id="simple_instruction" name="instruction" placeholder="e.g. Flip Pad_Clip Reversed only">
+      <label for="freecadcmd_simple">freecadcmd</label>
+      <input type="text" id="freecadcmd_simple" name="freecadcmd" value="freecadcmd">
+      <label for="api_key_simple">Meta API key</label>
+      <input type="password" id="api_key_simple" name="api_key" autocomplete="off">
+      <p class="note">{tr(lang, 'key_note')}</p>
+      <button type="submit">{tr(lang, 'simple_fix_btn')}</button>
       </form></div>"""
 
     # Fresh-start form (Nov 1, 2026 user rule): one button starts
@@ -2231,6 +2353,294 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
                     f"<td><a href=\"/download?{query}\">{tr(lang, 'download')}</a> · "
                     f"<a href=\"/view?{query}\">{tr(lang, 'view_link')}</a></td></tr>"
                 )
+    # Frame-check tab (Nov 1, 2026 user rule): criterion table +
+    # model previews + measured results + edit form below.
+    # The criterion lives in frame.json; the check result in
+    # frame_check.json. Both are written by run_pipeline.py
+    # --check-frame (no LLM call, no rebuild). The edit form
+    # below saves the criterion and re-runs only the check.
+    # frame.json shape (the pipeline's schema; unknown fields
+    # pass through untouched on save): axes {horizontal, depth,
+    # vertical}, front_view, datum {description, features},
+    # extents {width/depth/height: {value, axis}}, dimensions
+    # [{id, label, value, axis, feature, user_set}], gate_off,
+    # user_edited. Older flat fields (front_horizontal, datum as
+    # a string) are read as a fallback but never written back.
+    folder_model_str = folder_model(output_dir)
+    _frame = {}
+    _frame_path = output_dir / "frame.json"
+    if _frame_path.is_file():
+        try:
+            _parsed_frame = json.loads(_frame_path.read_text(
+                encoding="utf-8"))
+            if isinstance(_parsed_frame, dict):
+                _frame = _parsed_frame
+        except Exception:
+            _frame = {}
+    _frame_is_default = not bool(_frame)
+
+    def _frame_axis(value, default):
+        v = str(value or "").strip().upper()
+        return v if v in ("X", "Y", "Z") else default
+
+    _faxes = _frame.get("axes", {})
+    if not isinstance(_faxes, dict):
+        _faxes = {}
+    _fh = _frame_axis(_faxes.get("horizontal",
+                                 _frame.get("front_horizontal")), "X")
+    _fd = _frame_axis(_faxes.get("depth"), "Y")
+    _fv = _frame_axis(_faxes.get("vertical"), "Z")
+    _fdatum_obj = _frame.get("datum", {})
+    if isinstance(_fdatum_obj, dict):
+        _fdatum = str(_fdatum_obj.get("description", "") or "")
+        _fdatum_feats = _fdatum_obj.get("features", [])
+        if not isinstance(_fdatum_feats, list):
+            _fdatum_feats = []
+    else:
+        _fdatum = str(_fdatum_obj or "")
+        _fdatum_feats = []
+    _ffront = str(_frame.get("front_view", "") or "")
+    _fextents = _frame.get("extents", {})
+    if not isinstance(_fextents, dict):
+        _fextents = {}
+    # Dimensions for display + editing: dimensions.json D-rows
+    # merged with frame.json stored axes (stored wins). Before
+    # the first check frame.json has no dimensions, so the rows
+    # show with no axis yet; after any check the gate writes the
+    # effective axes back into frame.json, so the tab shows
+    # exactly what was checked.
+    _stored_dims = {}
+    _fdims_raw = _frame.get("dimensions", [])
+    if isinstance(_fdims_raw, list):
+        for _d in _fdims_raw:
+            if isinstance(_d, dict) and _d.get("id"):
+                _stored_dims[str(_d["id"])] = _d
+    _fdims = []
+    try:
+        _drows = json.loads((output_dir / "dimensions.json").read_text(
+            encoding="utf-8"))
+    except Exception:
+        _drows = []
+    if isinstance(_drows, list):
+        for _d in _drows:
+            if not isinstance(_d, dict) or not _d.get("id"):
+                continue
+            if _d.get("reference"):
+                continue
+            _e = {"id": str(_d["id"]),
+                  "label": str(_d.get("label", "") or ""),
+                  "value": _d.get("value", "")}
+            _st = _stored_dims.get(_e["id"])
+            if _st and _st.get("axis"):
+                _e["axis"] = _st["axis"]
+            _fdims.append(_e)
+    for _did, _st in _stored_dims.items():
+        if _did not in {d["id"] for d in _fdims}:
+            _fdims.append({"id": _did,
+                           "label": str(_st.get("label", "") or ""),
+                           "value": _st.get("value", ""),
+                           "axis": _st.get("axis", "")})
+    _fgate_off = bool(_frame.get("gate_off", False))
+
+    def _axis_select(name, current, allow_empty=False):
+        _opts = ""
+        if allow_empty:
+            _sel = " selected" if not current else ""
+            _opts += f"<option value=\"\"{_sel}>—</option>"
+        _opts += "".join(
+            f"<option value=\"{a}\"{' selected' if a == current else ''}>"
+            f"{a}</option>" for a in ("X", "Y", "Z"))
+        return f"<select name=\"{name}\">{_opts}</select>"
+
+    _crit_rows = ""
+    _crit_rows += (f"<tr><td>Front view</td>"
+                   f"<td>{html.escape(_ffront) if _ffront else '—'}</td></tr>")
+    _crit_rows += (f"<tr><td>{tr(lang, 'frame_axis_front')}</td>"
+                   f"<td>{_fh}</td></tr>")
+    _crit_rows += (f"<tr><td>{tr(lang, 'frame_axis_depth')}</td>"
+                   f"<td>{_fd}</td></tr>")
+    _crit_rows += (f"<tr><td>{tr(lang, 'frame_axis_vertical')}</td>"
+                   f"<td>{_fv}</td></tr>")
+    _crit_rows += (f"<tr><td>{tr(lang, 'frame_datum')}</td>"
+                   f"<td>{html.escape(_fdatum) if _fdatum else '—'}</td></tr>")
+    _fdatum_feats_txt = ", ".join(html.escape(str(f))
+                                  for f in _fdatum_feats) \
+        if _fdatum_feats else "—"
+    _crit_rows += (f"<tr><td>{tr(lang, 'frame_datum_features')}</td>"
+                   f"<td>{_fdatum_feats_txt}</td></tr>")
+    for _ename, _elabel in (("width", tr(lang, 'frame_extent_width')),
+                            ("depth", tr(lang, 'frame_extent_depth')),
+                            ("height", tr(lang, 'frame_extent_height'))):
+        _e = _fextents.get(_ename, {})
+        if isinstance(_e, dict) and _e.get("value") is not None:
+            _crit_rows += (
+                f"<tr><td>{html.escape(_elabel)}</td>"
+                f"<td>{html.escape(str(_e['value']))} mm on "
+                f"{html.escape(str(_e.get('axis', '—') or '—'))}</td></tr>")
+    for _d in _fdims:
+        if not isinstance(_d, dict):
+            continue
+        _did = str(_d.get("id", "") or "")
+        if not _did:
+            continue
+        _dlab = str(_d.get("label", "") or "")
+        _dval = _d.get("value", "")
+        _dax = _frame_axis(_d.get("axis"), "")
+        _ditem = html.escape(_did)
+        if _dlab:
+            _ditem += " — " + html.escape(_dlab)
+        if _dval != "" and _dval is not None:
+            _ditem += f" = {html.escape(str(_dval))} mm"
+        _crit_rows += (f"<tr><td>{_ditem}</td>"
+                       f"<td>{_dax if _dax else '—'}</td></tr>")
+    _crit_table = (
+        f"<table class=\"files\"><tr><th>Item</th>"
+        f"<th>Declared</th></tr>{_crit_rows}</table>")
+    _frame_previews = [n for n in image_files
+                       if n.startswith(("preview_front", "preview_top",
+                                        "preview_side"))]
+    if _frame_previews:
+        _frame_prev_cards = "".join(
+            img_card(n, tr(lang, "preview_caption"))
+            for n in _frame_previews)
+    else:
+        _frame_prev_cards = (f"<div class=\"card\"><p class=\"note\">"
+                             f"{tr(lang, 'frame_previews_none')}</p></div>")
+    _fc = None
+    _fc_path = output_dir / "frame_check.json"
+    if _fc_path.is_file():
+        try:
+            _fc = json.loads(_fc_path.read_text(encoding="utf-8"))
+        except Exception:
+            _fc = None
+    if isinstance(_fc, dict):
+        # Pipeline shape: passed, errors[], warnings[],
+        # measurements {whole_sizes, tess, extent_*, dim_*, datum}.
+        _passed = _fc.get("passed")
+        _verdict = "PASS" if _passed is True else (
+            "FAIL" if _passed is False else "—")
+        _verdict_cls = {"PASS": "status-ok",
+                        "FAIL": "status-err"}.get(_verdict, "status-warn")
+        _meas = _fc.get("measurements", {})
+        if not isinstance(_meas, dict):
+            _meas = {}
+
+        def _ox(declared, measured, tol=0.1):
+            if isinstance(declared, (int, float)) and \
+                    isinstance(measured, (int, float)) and \
+                    abs(measured - declared) <= tol:
+                return "O"
+            return "X"
+
+        _fc_rows = ""
+        for _key in sorted(_meas):
+            if not (_key.startswith("extent_") or
+                    _key.startswith("dim_")):
+                continue
+            _e = _meas[_key]
+            if not isinstance(_e, dict):
+                continue
+            _label = _key[len("extent_"):] if _key.startswith(
+                "extent_") else _key[len("dim_"):]
+            _decl = _e.get("declared", "")
+            _ax = _e.get("axis", "")
+            _m = _e.get("measured", "")
+            if _e.get("skipped"):
+                _cres, _disp = "?", "—"
+            else:
+                _cres = _ox(_decl, _m)
+                _disp = f"{_m:.4f}" if isinstance(_m, float) else \
+                    html.escape(str(_m))
+            _ccls = {"O": "status-ok", "X": "status-err"}.get(
+                _cres, "status-warn")
+            _feat = f" via {html.escape(str(_e['feature']))}" \
+                if _e.get("feature") else ""
+            _fc_rows += (
+                f"<tr><td>{html.escape(_label)}{_feat}</td>"
+                f"<td>{html.escape(str(_decl))} mm"
+                f"{' on ' + html.escape(str(_ax)) if _ax else ''}</td>"
+                f"<td>{_disp} mm</td>"
+                f"<td><span class=\"{_ccls}\">"
+                f"{html.escape(_cres)}</span></td></tr>")
+        _fc_table = (
+            f"<table class=\"files\"><tr><th>Item</th>"
+            f"<th>Declared</th><th>Measured</th>"
+            f"<th>Result</th></tr>{_fc_rows}</table>") if _fc_rows else ""
+        _datum_res = ""
+        _datum_meas = _meas.get("datum", {})
+        if isinstance(_datum_meas, dict) and _datum_meas:
+            _dax = str(_datum_meas.get("axis", "") or "")
+            _base = _datum_meas.get("base", [])
+            _fin = _datum_meas.get("final", [])
+            _datum_res = (
+                f"<p>Datum (axis {_dax}): base "
+                f"{html.escape(str(_base))} → final "
+                f"{html.escape(str(_fin))}</p>")
+        _errs = _fc.get("errors", [])
+        _err_list = ""
+        if isinstance(_errs, list) and _errs:
+            _err_list = "<ul>" + "".join(
+                f"<li>{html.escape(str(e))}</li>" for e in _errs) + "</ul>"
+        _warns = _fc.get("warnings", [])
+        _warn_list = ""
+        if isinstance(_warns, list) and _warns:
+            _warn_list = "<ul>" + "".join(
+                f"<li>{html.escape(str(w))}</li>"
+                for w in _warns) + "</ul>"
+        _frame_results = (
+            f"<p>Verdict: <span class=\"{_verdict_cls}\">"
+            f"{html.escape(_verdict)}</span></p>"
+            f"{_fc_table}{_datum_res}{_err_list}{_warn_list}")
+    elif _fc is not None:
+        _frame_results = f"<pre>{html.escape(str(_fc))}</pre>"
+    else:
+        _frame_results = (f"<p class=\"note\">"
+                          f"{tr(lang, 'frame_not_measured')}</p>")
+    _dim_selects = ""
+    for _d in _fdims:
+        if not isinstance(_d, dict):
+            continue
+        _did = str(_d.get("id", "") or "")
+        if not _did or not all(c.isalnum() or c in ("-", "_")
+                               for c in _did):
+            continue
+        _dax = _frame_axis(_d.get("axis"), "")
+        _dim_selects += (
+            f"<label>{html.escape(_did)} "
+            f"{tr(lang, 'frame_dim_axis')} "
+            f"{_axis_select(f'dim_axis_{_did}', _dax, allow_empty=True)}</label> ")
+    _gate_checked = "checked" if _fgate_off else ""
+    _default_note = (f"<p class=\"note\">{tr(lang, 'frame_default_note')}</p>"
+                     if _frame_is_default else "")
+    frame_tab = f"""
+      <div class="card"><h3>📐 {tr(lang, 'frame_criterion_title')}</h3>
+      {_default_note}
+      {_crit_table}</div>
+      <div class="grid2">{_frame_prev_cards}</div>
+      <div class="card"><h3>📐 {tr(lang, 'frame_results_title')}</h3>
+      {_frame_results}</div>
+      <div class="card"><h3>✏️ {tr(lang, 'frame_edit_title')}</h3>
+      <p class="note">{tr(lang, 'frame_edit_note')}</p>
+      <form action="/frame-check" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="dir" value="{html.escape(str(output_dir))}">
+      <input type="hidden" name="lang" value="{lang}">
+      <label>{tr(lang, 'frame_axis_front')} {_axis_select('front_horizontal', _fh)}</label>
+      <label>{tr(lang, 'frame_axis_depth')} {_axis_select('depth', _fd)}</label>
+      <label>{tr(lang, 'frame_axis_vertical')} {_axis_select('vertical', _fv)}</label>
+      <label>{tr(lang, 'frame_datum')}</label>
+      <input type="text" name="datum" value="{html.escape(_fdatum)}">
+      <label>{tr(lang, 'frame_datum_features')}</label>
+      <input type="text" name="datum_features" value="{html.escape(', '.join(str(f) for f in _fdatum_feats))}">
+      <label>{tr(lang, 'frame_extent_width')}</label>
+      <input type="text" name="extent_width" value="{html.escape(str(_fextents.get('width', {}).get('value', '')) if isinstance(_fextents.get('width', {}), dict) else '')}">
+      <label>{tr(lang, 'frame_extent_depth')}</label>
+      <input type="text" name="extent_depth" value="{html.escape(str(_fextents.get('depth', {}).get('value', '')) if isinstance(_fextents.get('depth', {}), dict) else '')}">
+      <label>{tr(lang, 'frame_extent_height')}</label>
+      <input type="text" name="extent_height" value="{html.escape(str(_fextents.get('height', {}).get('value', '')) if isinstance(_fextents.get('height', {}), dict) else '')}">
+      {_dim_selects}
+      <label><input type="checkbox" name="gate_off" value="on" {_gate_checked} style="width:auto;"> {tr(lang, 'frame_gate_off')}</label>
+      <button type="submit">{tr(lang, 'frame_save_btn')}</button>
+      </form></div>"""
     lang_query = urllib.parse.urlencode({"dir": str(output_dir), "lang": "en"})
     lang_query_ko = urllib.parse.urlencode({"dir": str(output_dir), "lang": "ko"})
     body = f"""
@@ -2241,6 +2651,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
     <hr>
     <div class="card"><h3 style="font-size:14px;">{tr(lang, 'result_sidebar')}</h3><p>{banner}</p>
     <p class="note">{tr(lang, 'output_folder')}<br><code>{html.escape(str(output_dir))}</code></p>
+    <p class="note">{tr(lang, 'folder_model')}<br><code>{html.escape(folder_model_str)}</code></p>
     <p><a class="btn" href="/?lang={lang}">{tr(lang, 'back_form')}</a></p>
     <p class="note"><a href="/result?{lang_query}">English</a> · <a href="/result?{lang_query_ko}">한국어</a></p></div>
   </div>
@@ -2254,6 +2665,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       <button type="button" class="tab-btn{' active' if _active_tab == 'r3' else ''}" data-tab="r3">&#128295; {tr(lang, 'tab_export')}</button>
       <button type="button" class="tab-btn{' active' if _active_tab == 'r4' else ''}" data-tab="r4">&#128269; {tr(lang, 'tab_qa')}</button>
       <button type="button" class="tab-btn{' active' if _active_tab == 'r5' else ''}" data-tab="r5">&#10003; {tr(lang, 'tab_matching')}</button>
+      <button type="button" class="tab-btn{' active' if _active_tab == 'r6' else ''}" data-tab="r6">📐 {tr(lang, 'tab_frame')}</button>
     </div>
     <div class="tab-panel{' active' if _active_tab == 'r1' else ''}" id="r1">
       <div class="card"><h3>🖼 {tr(lang, 'input_title')}</h3>
@@ -2284,6 +2696,9 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       <p class="note">{tr(lang, 'matching_legend')}</p>
       <p class="note">{tr(lang, 'matching_disclaimer')}</p></div>
     </div>
+    <div class="tab-panel{' active' if _active_tab == 'r6' else ''}" id="r6">
+      {frame_tab}
+    </div>
     <div class="tab-panel{' active' if _active_tab == 'r4' else ''}" id="r4">
       <div class="card"><h3>❓ {tr(lang, 'questions_title')}</h3><pre>{html.escape(questions_display) if questions_display else tr(lang, 'questions_none')}</pre><p class="note">{tr(lang, 'questions_note')}</p></div>
       {proposal_card}
@@ -2292,6 +2707,7 @@ def result_page(output_dir, returncode, stdout_tail="", lang="en",
       {partial_card}
       {draft_notice}
       {answer_form}
+      {simple_fix_form}
       {fresh_start_form}
       <div class="grid2">
         <div class="card"><h3>{tr(lang, 'report_title')}</h3><pre>{html.escape(report_text) if report_text else tr(lang, 'report_none')}</pre></div>
@@ -2481,7 +2897,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest", "/build-table", "/trace", "/fresh-start"):
+        if parsed.path not in ("/run", "/answer", "/measure", "/export", "/inspect", "/remap", "/images", "/flip", "/suggest", "/build-table", "/trace", "/fresh-start", "/simple-fix", "/frame-check"):
             self.send_error(404, "Not found")
             return
         try:
@@ -2535,6 +2951,9 @@ class Handler(BaseHTTPRequestHandler):
                 files["outline"] = (outline_path.name,
                                     outline_path.read_bytes())
             fields["ask_first"] = "on"
+            # A fresh start inherits the previous folder's model, so
+            # the new folder does not silently switch models.
+            fields["model"] = folder_model(prev_dir)
             parsed = parsed._replace(path="/run")
         if parsed.path == "/measure":
             # Real measurement: no API call, no rebuild. Runs
@@ -2734,6 +3153,7 @@ class Handler(BaseHTTPRequestHandler):
             command = [sys.executable, str(RUN_PIPELINE), "--suggest",
                        "--output-dir", str(output_dir),
                        "--drawing", str(drawings[0]),
+                       "--model", folder_model(output_dir),
                        "--freecadcmd", fields.get("freecadcmd", "freecadcmd") or "freecadcmd"]
             log_path = output_dir / "web_ui_suggest.log"
             suggest_env = dict(os.environ)
@@ -2808,6 +3228,7 @@ class Handler(BaseHTTPRequestHandler):
             command = [sys.executable, str(RUN_PIPELINE), "--patch",
                        "--output-dir", str(output_dir),
                        "--freecadcmd", freecadcmd_value,
+                       "--model", folder_model(output_dir),
                        "--text", flip_text]
             log_path = output_dir / "web_ui_run.log"
             flip_env = dict(os.environ)
@@ -2900,7 +3321,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             command = [sys.executable, str(RUN_PIPELINE), "--remap",
                        "--output-dir", str(output_dir),
-                       "--freecadcmd", freecadcmd_value]
+                       "--freecadcmd", freecadcmd_value,
+                       "--model", folder_model(output_dir)]
             log_path = output_dir / "web_ui_remap.log"
             remap_env = dict(os.environ)
             remap_env["PYTHONUTF8"] = "1"
@@ -3019,6 +3441,203 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            return
+        if parsed.path == "/simple-fix":
+            # Simple fix: ONE instruction, macro + instruction only.
+            # Runs run_pipeline.py --simple-fix in this folder (one
+            # LLM call), then shows the result page exactly like
+            # /answer does. Full verification still applies inside
+            # the pipeline run.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            instruction = fields.get("instruction", "").strip()
+            if not instruction:
+                data = error_page(tr(lang, "err_simple_fix_empty"), lang=lang)
+                self._send_html(400, data)
+                return
+            if not (output_dir / "macro.py").is_file():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            api_key = fields.get("api_key", "")
+            if not api_key and not dotenv_key_present():
+                data = error_page(tr(lang, "err_key"), lang=lang)
+                self._send_html(400, data)
+                return
+            freecadcmd_value = (fields.get("freecadcmd", "freecadcmd")
+                                or "freecadcmd")
+            if not freecadcmd_found(freecadcmd_value):
+                data = error_page(tr(lang, "err_freecadcmd"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--simple-fix",
+                       "--output-dir", str(output_dir),
+                       "--text", instruction,
+                       "--model", folder_model(output_dir),
+                       "--freecadcmd", freecadcmd_value]
+            log_path = output_dir / "web_ui_simple_fix.log"
+            sf_env = dict(os.environ)
+            sf_env["PYTHONUTF8"] = "1"
+            if api_key:
+                sf_env["META_API_KEY"] = api_key
+            else:
+                sf_env.pop("META_API_KEY", None)
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=sf_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_simple_fix_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang)
+            self._send_html(200, data)
+            return
+        if parsed.path == "/frame-check":
+            # Save the edited frame criterion (frame.json + gate
+            # flag), then re-run ONLY the check: run_pipeline.py
+            # --check-frame, no LLM call, no rebuild, no model
+            # flag. The result page reopens on the frame tab
+            # with the new verdict.
+            raw_dir = fields.get("dir", "")
+            try:
+                output_dir = Path(raw_dir).resolve()
+            except OSError:
+                output_dir = None
+            if output_dir is None or not output_dir.is_dir():
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            frame = {}
+            frame_path = output_dir / "frame.json"
+            if frame_path.is_file():
+                try:
+                    _old = json.loads(frame_path.read_text(
+                        encoding="utf-8"))
+                    if isinstance(_old, dict):
+                        frame = _old
+                except Exception:
+                    frame = {}
+            def _axis_field(name, default):
+                v = (fields.get(name, "") or "").strip().upper()
+                return v if v in ("X", "Y", "Z") else default
+            # Nested schema (the pipeline's schema). Legacy flat
+            # fields are dropped so there is exactly one source
+            # of truth. user_edited=True: a later LLM FRAME block
+            # must never overwrite a correction made here.
+            _cur_axes = frame.get("axes", {})
+            if not isinstance(_cur_axes, dict):
+                _cur_axes = {}
+            frame["axes"] = {
+                "horizontal": _axis_field(
+                    "front_horizontal",
+                    _cur_axes.get("horizontal",
+                                  frame.get("front_horizontal", "X"))),
+                "depth": _axis_field(
+                    "depth",
+                    _cur_axes.get("depth", frame.get("depth", "Y"))),
+                "vertical": _axis_field(
+                    "vertical",
+                    _cur_axes.get("vertical", frame.get("vertical", "Z"))),
+            }
+            for _legacy in ("front_horizontal", "depth", "vertical"):
+                frame.pop(_legacy, None)
+            _dfeats = [f.strip() for f in
+                       (fields.get("datum_features", "") or "")
+                       .split(",") if f.strip()]
+            frame["datum"] = {
+                "description": (fields.get("datum", "") or "").strip(),
+                "features": _dfeats,
+            }
+            frame["gate_off"] = fields.get("gate_off") == "on"
+            frame["user_edited"] = True
+            # Extents: only overwrite values the user typed; a
+            # blank field leaves the stored extent untouched.
+            _ext = frame.get("extents", {})
+            if not isinstance(_ext, dict):
+                _ext = {}
+            _axmap = {"width": frame["axes"]["horizontal"],
+                      "depth": frame["axes"]["depth"],
+                      "height": frame["axes"]["vertical"]}
+            for _ename, _field in (("width", "extent_width"),
+                                   ("depth", "extent_depth"),
+                                   ("height", "extent_height")):
+                _raw = (fields.get(_field, "") or "").strip()
+                if _raw:
+                    try:
+                        _val = float(_raw)
+                    except ValueError:
+                        continue
+                    if _val > 0:
+                        _ext[_ename] = {"value": _val,
+                                        "axis": _axmap[_ename]}
+            frame["extents"] = _ext
+            # Dimensions: merged id set = dimensions.json rows +
+            # stored frame.json entries. A valid axis stores an
+            # override (user_set); a blank selection clears the
+            # override so the next check re-derives it.
+            _dim_ids = set()
+            try:
+                _drows = json.loads(
+                    (output_dir / "dimensions.json").read_text(
+                        encoding="utf-8"))
+                if isinstance(_drows, list):
+                    for _d in _drows:
+                        if isinstance(_d, dict) and _d.get("id"):
+                            _dim_ids.add(str(_d["id"]))
+            except Exception:
+                pass
+            _dims_list = frame.get("dimensions", [])
+            if not isinstance(_dims_list, list):
+                _dims_list = []
+            _by_id = {}
+            for _d in _dims_list:
+                if isinstance(_d, dict) and _d.get("id"):
+                    _by_id[str(_d["id"])] = _d
+            for _did in _dim_ids:
+                _by_id.setdefault(_did, {"id": _did})
+            for _did, _d in _by_id.items():
+                _key = f"dim_axis_{_did}"
+                if _key in fields:
+                    _v = (fields.get(_key, "") or "").strip().upper()
+                    if _v in ("X", "Y", "Z"):
+                        _d["axis"] = _v
+                        _d["user_set"] = True
+                    elif _v == "":
+                        _d.pop("axis", None)
+                        _d.pop("user_set", None)
+            frame["dimensions"] = [_d for _d in _by_id.values()
+                                   if _d.get("id")]
+            try:
+                frame_path.write_text(
+                    json.dumps(frame, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+            except OSError:
+                data = error_page(tr(lang, "err_prev_dir"), lang=lang)
+                self._send_html(400, data)
+                return
+            command = [sys.executable, str(RUN_PIPELINE), "--check-frame",
+                       "--output-dir", str(output_dir)]
+            log_path = output_dir / "web_ui_frame_check.log"
+            fc_env = dict(os.environ)
+            fc_env["PYTHONUTF8"] = "1"
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                result = subprocess.run(
+                    command, stdout=log_file, stderr=subprocess.STDOUT,
+                    timeout=3600, env=fc_env)
+            if result.returncode != 0:
+                data = error_page(tr(lang, "err_frame_failed"), lang=lang)
+                self._send_html(400, data)
+                return
+            data = result_page(output_dir, 0, lang=lang, active_tab="r6")
+            self._send_html(200, data)
             return
         qa_trail = ""
         if parsed.path == "/answer":
@@ -3288,6 +3907,20 @@ class Handler(BaseHTTPRequestHandler):
                 command.append("--ask-first")
             if dry_run:
                 command.append("--dry-run")
+
+        # Model: fresh runs use the form's choice (saved as
+        # model.txt so later folder actions keep it); /answer
+        # keeps the folder's model (model.txt, else standard).
+        if parsed.path == "/answer":
+            run_model = folder_model(output_dir)
+        else:
+            run_model = valid_model(fields.get("model", ""))
+            try:
+                (output_dir / "model.txt").write_text(
+                    run_model + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        command += ["--model", run_model]
 
         # The key travels ONLY in this subprocess environment, never
         # on the command line, never in a log, never on a result page.
