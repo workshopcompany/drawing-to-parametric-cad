@@ -3730,6 +3730,18 @@ def render_previews(output_dir):
     Returns (ok, note). The renderers now draw an XYZ axes triad
     in every preview (X red, Y green, Z blue) so directions in
     questions and patches can be talked about against the image.
+
+    Nov 1, 2026 fix (stale previews reported at home): a render
+    is a SUCCESS only when its subprocess exits 0 AND the two
+    main previews were actually rewritten (mtime or size changed
+    vs before the run). The old existence-only check returned
+    success from stale files whenever the first renderer failed,
+    so the fallback renderer never ran and the button showed old
+    images with no error. A failed renderer now always falls
+    through to the next one, even when old files exist; only
+    when every renderer fails is False returned (old files stay
+    on disk, but the caller reports the failure instead of
+    presenting them as fresh).
     """
     preview_iso = output_dir / "preview_iso.png"
     preview_main = output_dir / "preview_main.png"
@@ -3742,10 +3754,19 @@ def render_previews(output_dir):
         script_dir / "render_preview.py",
         script_dir / "render_preview_pil.py",
     ]
+
+    def _stamp(path):
+        try:
+            st = path.stat()
+            return (st.st_mtime, st.st_size)
+        except OSError:
+            return None
+
     note = ""
     for render_script in render_scripts:
         if not render_script.is_file():
             continue
+        before = {p: _stamp(p) for p in (preview_iso, preview_main)}
         try:
             preview_result = subprocess.run(
                 [sys.executable, str(render_script), str(tris_path),
@@ -3754,14 +3775,20 @@ def render_previews(output_dir):
                  str(preview_side)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 timeout=300, text=True)
-            if preview_iso.is_file() and preview_main.is_file():
-                return True, (f"{preview_iso}, {preview_main} "
-                              f"(via {render_script.name})")
-            note = (f"{render_script.name} exit "
-                    f"{preview_result.returncode}, output: "
-                    f"{preview_result.stdout[-300:]}")
         except Exception as exc:
             note = f"{render_script.name}: {exc}"
+            continue
+        after = {p: _stamp(p) for p in (preview_iso, preview_main)}
+        rewritten = all(
+            after[p] is not None and after[p] != before[p]
+            for p in (preview_iso, preview_main))
+        if preview_result.returncode == 0 and rewritten:
+            return True, (f"{preview_iso}, {preview_main} "
+                          f"(via {render_script.name})")
+        note = (f"{render_script.name} exit "
+                f"{preview_result.returncode}, rewritten="
+                f"{rewritten}, output: "
+                f"{preview_result.stdout[-300:]}")
     return False, note
 
 
