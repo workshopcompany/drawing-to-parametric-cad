@@ -176,6 +176,11 @@ S = {
                       "윤곽을 직접 그리고 싶으면 "),
     "outline_note2": (" -> download JSON -> attach it on the left.",
                       " → JSON 다운 → 왼쪽 윤곽 첨부에 올리세요."),
+    "guide_note1": ("To make an outline profile, see the ",
+                    "윤곽 프로파일을 만들려면 "),
+    "guide_link_text": ("outline profile guide (English)",
+                        "윤곽 프로파일 설명서(영문)"),
+    "guide_note2": (".", "."),
     "sample_title": ("Bundled sample drawings (click for full size)",
                      "번들 샘플 도면 (클릭하면 원본 크기)"),
     "sample_empty": ("No samples in the image/ folder.",
@@ -734,10 +739,23 @@ S = {
 
 
 def tr(lang, key, **kw):
-    """Translate key; lang 'ko' picks Korean, anything else English."""
-    pair = S.get(key, ("", ""))
+    """Translate key; lang 'ko' picks Korean, anything else English.
+
+    English is the fallback, never blank: a missing key returns the key
+    itself (visible, debuggable), and a placeholder mismatch returns the
+    raw text instead of raising. A failed translation must never blank
+    out a label or crash the page.
+    """
+    pair = S.get(key)
+    if pair is None:
+        return key
     text = pair[1] if lang == "ko" else pair[0]
-    return text.format(**kw) if kw else text
+    if not kw:
+        return text
+    try:
+        return text.format(**kw)
+    except (KeyError, IndexError, ValueError):
+        return text
 
 
 FOOTER_EN = (
@@ -1387,9 +1405,12 @@ def recent_html(lang="en"):
                             f"{tr(lang, 'outline_note2')}</p>")
     except OSError:
         pass
+    guide_link = (f"<p class=\"note\">{tr(lang, 'guide_note1')}"
+                  "<a href=\"https://github.com/workshopcompany/drawing-to-parametric-cad/blob/main/orchestrator/OUTLINE_PROFILE_GUIDE_EN.md\" target=\"_blank\">"
+                  f"{tr(lang, 'guide_link_text')}</a>{tr(lang, 'guide_note2')}</p>")
     return (f"<div class=\"card\"><h3>&#128193; {tr(lang, 'recent_title')}</h3>"
             f"<p class=\"note\">{tr(lang, 'recent_note')}</p>"
-            f"{table}{outline_link}"
+            f"{table}{outline_link}{guide_link}"
             "<div id=\"recentBox\" class=\"note\" style=\"display:none;\"></div></div>")
 
 
