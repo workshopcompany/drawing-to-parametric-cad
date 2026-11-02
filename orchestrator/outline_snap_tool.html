@@ -185,6 +185,9 @@
       .tag.manual{background:color-mix(in srgb,var(--warn) 18%, transparent); color:var(--warn)}
       .tag.none{background:color-mix(in srgb,var(--snap) 14%, transparent); color:var(--snap)}
       .tag.far{background:transparent; border:1px solid var(--warn); color:var(--warn); padding:0 6px}
+      .tag.traced{background:color-mix(in srgb,#7c3aed 16%, transparent); color:#7c3aed}
+      #loupe{position:fixed; width:220px; height:220px; border:2px solid #191d21; border-radius:12px; overflow:hidden; background:#fff; box-shadow:0 8px 24px rgba(0,0,0,.25); pointer-events:none; z-index:60; display:none}
+      #loupe canvas{width:220px; height:220px; display:block}
       .rowdel{border:0; background:none; color:var(--ink-2); font-size:15px; padding:0 2px; line-height:1}
       .rowdel:hover{color:var(--snap)}
       .noresult{padding:16px; text-align:center; color:var(--ink-2); font-size:13px}
@@ -229,6 +232,7 @@
           <button id="btnZoomIn" aria-label="확대">＋</button>
         </div>
         <span class="zoomval mono" id="zoomVal">100%</span>
+        <button class="btn" id="btnLoupe" aria-pressed="false">돋보기</button>
       </header>
 
       <div class="main">
@@ -293,6 +297,8 @@
               <small>마지막 점과 첫 점을 이어 닫힌 윤곽으로 표시하고 내보냅니다.</small></label>
             <label class="check"><input type="checkbox" id="chkResnap" checked /> 드래그를 놓을 때 다시 스냅
               <small>수동으로 옮긴 점도 놓는 위치 근처의 선에 다시 붙입니다. 끄면 옮긴 자리가 그대로 확정됩니다.</small></label>
+            <button class="btn" id="btnTraceAlong" style="margin-top:10px">선 따라 보정</button>
+            <div class="hint" id="traceAlongStatus">스냅된 점들 사이 구간을 도면 선을 따라 보정합니다. 선을 찾지 못한 구간은 직선으로 남습니다.</div>
             <div class="hint">
               <b>점 편집</b> — 스냅된 점을 드래그해 고치고, 선 위를 <b>더블클릭</b>하면 그 자리에 점이 추가됩니다.
               점을 <b>우클릭</b>하거나 목록에서 ✕를 누르면 삭제, <span class="kbd">Ctrl</span>+<span class="kbd">Z</span>는 실행취소입니다.
@@ -634,23 +640,230 @@
       pctx.putImageData(pimg, 0, 0);
       S.mask = mask; S.maskCanvas = prev;
     }
+    /* ===== PURE-LOGIC-BEGIN: center snap + ink trace (no DOM, node-testable) ===== */
+    function norm2(x, y){ var l = Math.hypot(x, y) || 1; return { x: x / l, y: y / l }; }
+    function inkAtMask(mask, W, H, x, y){
+      var px = Math.round(x), py = Math.round(y);
+      if (px < 0 || py < 0 || px >= W || py >= H) return false;
+      return !!mask[py * W + px];
+    }
     /* nearest ink pixel within radius (exhaustive box scan, smallest distance wins) */
-    function snapToLine(x, y){
-      if (!S.mask) return null;
-      var r = settings().radius, W = S.imgW, H = S.imgH;
+    function nearestInkOnMask(mask, W, H, x, y, r){
+      if (!mask) return null;
       var x0 = Math.max(0, Math.floor(x - r)), x1 = Math.min(W - 1, Math.ceil(x + r));
       var y0 = Math.max(0, Math.floor(y - r)), y1 = Math.min(H - 1, Math.ceil(y + r));
       var best = null, bestD = r * r + 1e-9;
       for (var py = y0; py <= y1; py++){
         var row = py * W;
         for (var px = x0; px <= x1; px++){
-          if (S.mask[row + px]){
+          if (mask[row + px]){
             var dx = px - x, dy = py - y, d = dx * dx + dy * dy;
             if (d < bestD){ bestD = d; best = { x: px, y: py }; }
           }
         }
       }
       return best;
+    }
+    function collectWindowInk(mask, W, H, cx, cy, half){
+      var out = [];
+      for (var py = Math.max(0, cy - half); py <= Math.min(H - 1, cy + half); py++){
+        for (var px = Math.max(0, cx - half); px <= Math.min(W - 1, cx + half); px++){
+          if (mask[py * W + px]) out.push({ x: px, y: py });
+        }
+      }
+      return out;
+    }
+    /* PCA principal direction of ink pixels; null when too few or ambiguous
+       (near-isotropic: blob, or a crossing where two lines meet) */
+    function pcaDirection(pts){
+      var n = pts.length;
+      if (n < 8) return null;
+      var mx = 0, my = 0, i;
+      for (i = 0; i < n; i++){ mx += pts[i].x; my += pts[i].y; }
+      mx /= n; my /= n;
+      var sxx = 0, syy = 0, sxy = 0;
+      for (i = 0; i < n; i++){
+        var ex = pts[i].x - mx, ey = pts[i].y - my;
+        sxx += ex * ex; syy += ey * ey; sxy += ex * ey;
+      }
+      var tr = sxx + syy, det = sxx * syy - sxy * sxy;
+      var disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+      var l1 = tr / 2 + disc, l2 = tr / 2 - disc;
+      if (l1 <= 0 || l2 / l1 > 0.6) return null;
+      var theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      return { x: Math.cos(theta), y: Math.sin(theta) };
+    }
+    /* center of the ink run crossed by the perpendicular through (px,py) along dir.
+       Returns null when the run is implausible (too wide, or the midpoint is off ink). */
+    function refineToCenter(mask, W, H, px, py, dir){
+      if (!dir || !(dir.x || dir.y)) return null;
+      var d = norm2(dir.x, dir.y);
+      var perpx = -d.y, perpy = d.x, maxStep = 12, tPlus = 0, tMinus = 0, t;
+      for (t = 0.5; t <= maxStep; t += 0.5){
+        if (inkAtMask(mask, W, H, px + perpx * t, py + perpy * t)) tPlus = t; else break;
+      }
+      for (t = 0.5; t <= maxStep; t += 0.5){
+        if (inkAtMask(mask, W, H, px - perpx * t, py - perpy * t)) tMinus = t; else break;
+      }
+      if (tPlus === 0 && tMinus === 0) return { x: px, y: py };
+      var mid = (tPlus - tMinus) / 2;
+      if (Math.abs(mid) > 6) return null;
+      var cx = px + perpx * mid, cy = py + perpy * mid;
+      if (!inkAtMask(mask, W, H, cx, cy)) return null;
+      return { x: cx, y: cy };
+    }
+    /* full centerline snap: nearest ink pixel, then stroke-center refinement.
+       dirHint (travel/segment direction) is preferred when given: at a crossing
+       the PCA direction is ambiguous or leans to the wrong line, while the
+       travel direction says which line the user means. Guards inside
+       refineToCenter (on-ink midpoint, shift cap) reject a bad hint. */
+    function centerSnapOnMask(mask, W, H, x, y, r, dirHint){
+      var s = nearestInkOnMask(mask, W, H, x, y, r);
+      if (!s) return null;
+      var dir = null;
+      if (dirHint && (dirHint.x || dirHint.y)) dir = norm2(dirHint.x, dirHint.y);
+      else dir = pcaDirection(collectWindowInk(mask, W, H, s.x, s.y, 10));
+      if (!dir) return s;
+      return refineToCenter(mask, W, H, s.x, s.y, dir) || s;
+    }
+    /* small binary min-heap for Dijkstra: entries [dist, state] */
+    function makeHeap(){
+      var a = [];
+      function push(d, s){
+        a.push([d, s]);
+        var i = a.length - 1;
+        while (i > 0){
+          var p = (i - 1) >> 1;
+          if (a[p][0] <= a[i][0]) break;
+          var tmp = a[p]; a[p] = a[i]; a[i] = tmp; i = p;
+        }
+      }
+      function pop(){
+        if (!a.length) return null;
+        var top = a[0], last = a.pop();
+        if (a.length){
+          a[0] = last;
+          var i = 0;
+          for (;;){
+            var l = 2 * i + 1, r = l + 1, m = i;
+            if (l < a.length && a[l][0] < a[m][0]) m = l;
+            if (r < a.length && a[r][0] < a[m][0]) m = r;
+            if (m === i) break;
+            var tmp2 = a[m]; a[m] = a[i]; a[i] = tmp2; i = m;
+          }
+        }
+        return top;
+      }
+      return { push: push, pop: pop, size: function(){ return a.length; } };
+    }
+    /* Dijkstra ink trace from (ax,ay) to (bx,by) inside a corridor of halfWidth
+       around the chord. State carries the current run of consecutive non-ink
+       steps (max 3, each penalised) so dashed/thin gaps are bridged but the
+       trace cannot wander off the line. Returns {path,length} or
+       {path:null,reason} where reason is 'no-path' | 'too-large' | 'no-ink'. */
+    function traceInkPath(mask, W, H, ax, ay, bx, by, halfWidth){
+      var sx = Math.round(ax), sy = Math.round(ay), tx = Math.round(bx), ty = Math.round(by);
+      if (sx === tx && sy === ty) return { path: [{ x: sx, y: sy }], length: 0 };
+      if (!inkAtMask(mask, W, H, sx, sy)){
+        var ns = nearestInkOnMask(mask, W, H, sx, sy, 2);
+        if (!ns) return { path: null, reason: "no-ink" };
+        sx = ns.x; sy = ns.y;
+      }
+      if (!inkAtMask(mask, W, H, tx, ty)){
+        var nt = nearestInkOnMask(mask, W, H, tx, ty, 2);
+        if (!nt) return { path: null, reason: "no-ink" };
+        tx = nt.x; ty = nt.y;
+      }
+      var x0 = Math.max(0, Math.min(sx, tx) - halfWidth), x1 = Math.min(W - 1, Math.max(sx, tx) + halfWidth);
+      var y0 = Math.max(0, Math.min(sy, ty) - halfWidth), y1 = Math.min(H - 1, Math.max(sy, ty) + halfWidth);
+      var cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+      if (cw * ch > 300000) return { path: null, reason: "too-large" };
+      /* corridor membership: clamped distance from segment <= halfWidth */
+      var vx = tx - sx, vy = ty - sy, L2 = vx * vx + vy * vy;
+      var inCorr = new Uint8Array(cw * ch);
+      var ix, iy;
+      for (iy = 0; iy < ch; iy++){
+        for (ix = 0; ix < cw; ix++){
+          var px = x0 + ix, py = y0 + iy;
+          var t = L2 ? ((px - sx) * vx + (py - sy) * vy) / L2 : 0;
+          t = Math.max(0, Math.min(1, t));
+          var dx = px - (sx + t * vx), dy = py - (sy + t * vy);
+          if (dx * dx + dy * dy <= halfWidth * halfWidth) inCorr[iy * cw + ix] = 1;
+        }
+      }
+      var NGAP = 4, NSTATE = cw * ch * NGAP;
+      var dist = new Float64Array(NSTATE);
+      var prev = new Int32Array(NSTATE);
+      var si;
+      for (si = 0; si < NSTATE; si++){ dist[si] = Infinity; prev[si] = -1; }
+      function idx(ix2, iy2, g){ return (iy2 * cw + ix2) * NGAP + g; }
+      var heap = makeHeap();
+      var sIdx = idx(sx - x0, sy - y0, 0);
+      dist[sIdx] = 0;
+      heap.push(0, sIdx);
+      var goal = -1;
+      var DIRS = [[1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+                  [1, 1, 1.41421356], [1, -1, 1.41421356], [-1, 1, 1.41421356], [-1, -1, 1.41421356]];
+      while (heap.size()){
+        var top = heap.pop(), d = top[0], cur = top[1];
+        if (d > dist[cur]) continue;
+        var g = cur % NGAP, rem = (cur - g) / NGAP, cy2 = Math.floor(rem / cw), cx2 = rem % cw;
+        if (cx2 === tx - x0 && cy2 === ty - y0){ goal = cur; break; }
+        for (var k = 0; k < 8; k++){
+          var nx = cx2 + DIRS[k][0], ny = cy2 + DIRS[k][1];
+          if (nx < 0 || ny < 0 || nx >= cw || ny >= ch) continue;
+          if (!inCorr[ny * cw + nx]) continue;
+          var isInk = !!mask[(y0 + ny) * W + (x0 + nx)];
+          var ng, nd;
+          if (isInk){ ng = 0; nd = d + DIRS[k][2]; }
+          else if (g < 3){ ng = g + 1; nd = d + DIRS[k][2] + 6; }
+          else continue;
+          var nIdx = idx(nx, ny, ng);
+          if (nd < dist[nIdx]){ dist[nIdx] = nd; prev[nIdx] = cur; heap.push(nd, nIdx); }
+        }
+      }
+      if (goal < 0) return { path: null, reason: "no-path" };
+      var path = [], cur2 = goal, guard = 0;
+      while (cur2 >= 0 && guard++ < NSTATE + 5){
+        var g2 = cur2 % NGAP, rem2 = (cur2 - g2) / NGAP;
+        path.push({ x: x0 + (rem2 % cw), y: y0 + Math.floor(rem2 / cw) });
+        cur2 = prev[cur2];
+      }
+      path.reverse();
+      var len = 0;
+      for (var pi = 1; pi < path.length; pi++)
+        len += Math.hypot(path[pi].x - path[pi - 1].x, path[pi].y - path[pi - 1].y);
+      return { path: path, length: len };
+    }
+    /* iterative Douglas-Peucker (no recursion depth risk on long traces) */
+    function douglasPeucker(pts, tol){
+      var n = pts.length;
+      if (n <= 2) return pts.slice();
+      var keep = new Uint8Array(n);
+      keep[0] = 1; keep[n - 1] = 1;
+      var stack = [[0, n - 1]];
+      while (stack.length){
+        var seg = stack.pop(), i0 = seg[0], i1 = seg[1];
+        var ax = pts[i0].x, ay = pts[i0].y, bx = pts[i1].x, by = pts[i1].y;
+        var dx = bx - ax, dy = by - ay, segL2 = dx * dx + dy * dy;
+        var maxD = -1, maxI = -1;
+        for (var i = i0 + 1; i < i1; i++){
+          var tt = segL2 ? ((pts[i].x - ax) * dx + (pts[i].y - ay) * dy) / segL2 : 0;
+          tt = Math.max(0, Math.min(1, tt));
+          var qx = ax + tt * dx, qy = ay + tt * dy;
+          var dd = Math.hypot(pts[i].x - qx, pts[i].y - qy);
+          if (dd > maxD){ maxD = dd; maxI = i; }
+        }
+        if (maxD > tol){ keep[maxI] = 1; stack.push([i0, maxI]); stack.push([maxI, i1]); }
+      }
+      var out = [];
+      for (var j = 0; j < n; j++) if (keep[j]) out.push(pts[j]);
+      return out;
+    }
+    /* ===== PURE-LOGIC-END ===== */
+    function snapToLine(x, y){
+      if (!S.mask) return null;
+      return nearestInkOnMask(S.mask, S.imgW, S.imgH, x, y, settings().radius);
     }
 
     /* ================= view transform ================= */
@@ -693,6 +906,67 @@
       var cx = e.clientX - r.left, cy = e.clientY - r.top;
       return { x: (cx - S.view.ox) / S.view.scale, y: (cy - S.view.oy) / S.view.scale, cx: cx, cy: cy };
     }
+
+    /* ================= magnifier loupe (display-only, 6x) =================
+       A 220x220 floating window follows the cursor over the canvas and shows
+       the neighborhood magnified 6x with crisp pixels (no smoothing), a
+       crosshair on the exact cursor pixel, and a dashed circle for the snap
+       radius. pointer-events:none, so clicks still go to the main canvas. */
+    var loupeOn = false, loupeEl = null, loupeCtx = null;
+    function ensureLoupe(){
+      if (loupeEl) return;
+      loupeEl = document.createElement("div");
+      loupeEl.id = "loupe";
+      var cv = document.createElement("canvas");
+      cv.width = 220; cv.height = 220;
+      loupeEl.appendChild(cv);
+      document.body.appendChild(loupeEl);
+      loupeCtx = cv.getContext("2d");
+    }
+    function drawLoupe(e){
+      if (!loupeOn || !S.img || !loupeCtx) return;
+      var p = toImage(e), mag = 6, L = 220;
+      var sw = L / mag, sh = L / mag;
+      var sx = p.x - sw / 2, sy = p.y - sh / 2;
+      var cx0 = Math.max(0, Math.min(S.imgW - sw, sx));
+      var cy0 = Math.max(0, Math.min(S.imgH - sh, sy));
+      var dx = (cx0 - sx) * mag, dy = (cy0 - sy) * mag;
+      if (S.imgW < sw || S.imgH < sh){
+        /* tiny image: draw whole image centered instead */
+        sw = S.imgW; sh = S.imgH; cx0 = 0; cy0 = 0;
+        dx = (L - sw * mag) / 2; dy = (L - sh * mag) / 2;
+      }
+      var chx = (p.x - cx0) * mag + dx, chy = (p.y - cy0) * mag + dy;
+      loupeCtx.imageSmoothingEnabled = false;
+      loupeCtx.clearRect(0, 0, L, L);
+      loupeCtx.fillStyle = "#fff"; loupeCtx.fillRect(0, 0, L, L);
+      loupeCtx.drawImage(S.img, cx0, cy0, sw, sh, dx, dy, sw * mag, sh * mag);
+      loupeCtx.strokeStyle = "#d92d20"; loupeCtx.lineWidth = 1;
+      loupeCtx.beginPath();
+      loupeCtx.moveTo(chx, 0); loupeCtx.lineTo(chx, L);
+      loupeCtx.moveTo(0, chy); loupeCtx.lineTo(L, chy);
+      loupeCtx.stroke();
+      loupeCtx.strokeStyle = "#d92d20"; loupeCtx.lineWidth = 2;
+      loupeCtx.strokeRect(chx - mag / 2, chy - mag / 2, mag, mag);
+      loupeCtx.strokeStyle = "rgba(37,99,235,.9)"; loupeCtx.lineWidth = 1.4;
+      loupeCtx.setLineDash([5, 4]);
+      loupeCtx.beginPath(); loupeCtx.arc(chx, chy, settings().radius * mag, 0, Math.PI * 2); loupeCtx.stroke();
+      loupeCtx.setLineDash([]);
+      var vx = e.clientX + 24, vy = e.clientY + 24;
+      if (vx + L > window.innerWidth) vx = e.clientX - L - 24;
+      if (vy + L > window.innerHeight) vy = e.clientY - L - 24;
+      loupeEl.style.left = vx + "px"; loupeEl.style.top = vy + "px";
+      loupeEl.style.display = "block";
+    }
+    $("btnLoupe").addEventListener("click", function(){
+      loupeOn = !loupeOn;
+      this.setAttribute("aria-pressed", loupeOn ? "true" : "false");
+      ensureLoupe();
+      if (!loupeOn) loupeEl.style.display = "none";
+      toast(loupeOn ? "돋보기를 켰습니다. 도면 위에 마우스를 올리면 6배 확대가 따라다닙니다." : "돋보기를 껐습니다.");
+    });
+    stage.addEventListener("mousemove", function(e){ if (loupeOn) drawLoupe(e); });
+    stage.addEventListener("mouseleave", function(){ if (loupeEl) loupeEl.style.display = "none"; });
 
     /* ================= render ================= */
     function render(){
@@ -889,8 +1163,10 @@
         });
         /* points */
         pts.forEach(function(p, i){
-          ctx.fillStyle = "rgba(37,99,235,.9)";
-          ctx.beginPath(); ctx.arc(p.rx, p.ry, 3.2 * inv, 0, Math.PI * 2); ctx.fill();
+          if (p.via !== "traced"){
+            ctx.fillStyle = "rgba(37,99,235,.9)";
+            ctx.beginPath(); ctx.arc(p.rx, p.ry, 3.2 * inv, 0, Math.PI * 2); ctx.fill();
+          }
           if (isFar(p)){
             /* pulled point: snapped farther than the snap radius from the rough click */
             ctx.beginPath(); ctx.arc(p.sx, p.sy, 10.5 * inv, 0, Math.PI * 2);
@@ -898,10 +1174,19 @@
             ctx.setLineDash([4 * inv, 3 * inv]); ctx.stroke(); ctx.setLineDash([]);
           }
           var sel = i === S.selected;
-          ctx.beginPath(); ctx.arc(p.sx, p.sy, (sel ? 7 : 5) * inv, 0, Math.PI * 2);
-          ctx.fillStyle = p.status === "none" ? "#98a2b3" : "#d92d20";
-          ctx.fill();
-          ctx.strokeStyle = sel ? "#191d21" : "#ffffff"; ctx.lineWidth = (sel ? 2 : 1.4) * inv; ctx.stroke();
+          if (p.via === "traced"){
+            /* traced intermediate: purple diamond, distinct from user clicks */
+            ctx.beginPath();
+            ctx.moveTo(p.sx, p.sy - 5 * inv); ctx.lineTo(p.sx + 5 * inv, p.sy);
+            ctx.lineTo(p.sx, p.sy + 5 * inv); ctx.lineTo(p.sx - 5 * inv, p.sy); ctx.closePath();
+            ctx.fillStyle = "#7c3aed"; ctx.fill();
+            ctx.strokeStyle = sel ? "#191d21" : "#ffffff"; ctx.lineWidth = (sel ? 2 : 1.4) * inv; ctx.stroke();
+          } else {
+            ctx.beginPath(); ctx.arc(p.sx, p.sy, (sel ? 7 : 5) * inv, 0, Math.PI * 2);
+            ctx.fillStyle = p.status === "none" ? "#98a2b3" : "#d92d20";
+            ctx.fill();
+            ctx.strokeStyle = sel ? "#191d21" : "#ffffff"; ctx.lineWidth = (sel ? 2 : 1.4) * inv; ctx.stroke();
+          }
           ctx.fillStyle = "#191d21"; ctx.font = "600 " + (11 * inv) + "px 'IBM Plex Mono',monospace";
           ctx.fillText(String(i + 1), p.sx + 8 * inv, p.sy - 7 * inv);
         });
@@ -965,7 +1250,7 @@
         return "<tr data-i='" + i + "'" + (i === S.selected ? " class='sel'" : "") + ">" +
           "<td>" + (i + 1) + "</td><td>" + (p.seq || (i + 1)) + "</td><td>" + fmt(p.sx, 0) + "</td><td>" + fmt(p.sy, 0) + "</td>" +
           "<td>" + (mm ? fmt(mm.x, 3) : "—") + "</td><td>" + (mm ? fmt(mm.y, 3) : "—") + "</td>" +
-          "<td class='st'>" + statusTag(p.status) + (isFar(p) ? " <span class='tag far'>반경 초과 " + Math.round(p.dist) + "px</span>" : "") + "</td>" +
+          "<td class='st'>" + statusTag(p.status) + (p.via === "traced" ? " <span class='tag traced'>추적</span>" : "") + (isFar(p) ? " <span class='tag far'>반경 초과 " + Math.round(p.dist) + "px</span>" : "") + "</td>" +
           "<td><button class='rowdel' data-del='" + i + "' title='점 삭제' aria-label='점 " + (i + 1) + " 삭제'>✕</button></td></tr>";
       }).join("");
     }
@@ -1843,12 +2128,27 @@
       });
       return best;
     }
-    function makePoint(x, y, via){
-      var s = snapToLine(x, y);
+    function makePoint(x, y, via, hintDir){
+      /* centerline snap: nearest ink pixel, then stroke-center refinement.
+         The hint is the travel direction (previous point -> this click, or the
+         segment being split for an insert): at a crossing it says which line
+         the user means, so the crossing line cannot hijack the point. */
+      var s = null;
+      if (S.mask){
+        var hint = hintDir;
+        if (!hint && S.points.length){
+          var lp = S.points[S.points.length - 1];
+          if (lp && typeof lp.sx === "number"){
+            var near = nearestInkOnMask(S.mask, S.imgW, S.imgH, x, y, settings().radius);
+            if (near) hint = { x: near.x - lp.sx, y: near.y - lp.sy };
+          }
+        }
+        s = centerSnapOnMask(S.mask, S.imgW, S.imgH, x, y, settings().radius, hint);
+      }
       var pt = s ? { rx: x, ry: y, sx: s.x, sy: s.y, status: "snap" }
                  : { rx: x, ry: y, sx: x, sy: y, status: "none" };
       pt.seq = ++S.seq;                 /* click order, independent of polyline position */
-      pt.via = via || "click";          /* 'click' | 'insert' (dblclick) | 'import' */
+      pt.via = via || "click";          /* 'click' | 'insert' (dblclick) | 'import' | 'traced' */
       pt.dist = Math.hypot(pt.sx - pt.rx, pt.sy - pt.ry);
       return pt;
     }
@@ -1899,13 +2199,77 @@
         if (!best || d < best.d) best = { d: d, idx: i + 1, x: px, y: py };
       }
       if (!best || best.d > 14 / S.view.scale) return false;
+      var segA = pts[best.idx - 1], segB = pts[best.idx % n];
+      var segHint = (segA && segB) ? { x: segB.sx - segA.sx, y: segB.sy - segA.sy } : null;
       pushHistory();
-      S.points.splice(best.idx, 0, makePoint(x, y, "insert"));
+      S.points.splice(best.idx, 0, makePoint(x, y, "insert", segHint));
       S.selected = best.idx;
       render(); renderTable(); syncButtons();
       toast("주의: 선 중간에 점 " + (best.idx + 1) + "을 삽입했습니다. 이 점 뒤의 점 번호(#)가 +1 밀렸습니다 — 실제로 찍은 순서(순서 열)는 그대로 유지됩니다.");
       return true;
     }
+    /* ================= trace along the line between snapped points =================
+       For each consecutive pair of snapped points, replace the straight chord
+       with the actual ink path (Dijkstra in a corridor around the chord, gaps
+       up to 3 px bridged), simplified with Douglas-Peucker (~1 px). Inserted
+       intermediates are marked via:'traced' (purple diamonds in the canvas,
+       '추적' tag in the table, added_via:'traced' in export) and are ordinary
+       S.points entries, so delete/clear handle them; the whole operation is
+       one undo step. Segments with no ink path, or a path implausibly longer
+       than the chord, stay straight chords and are reported. */
+    function traceAlongLines(){
+      var statusEl = $("traceAlongStatus");
+      function report(msg){ if (statusEl) statusEl.textContent = msg; toast(msg); }
+      if (!S.img || !S.mask){ report("먼저 도면 이미지를 여세요."); return; }
+      var pts = S.points;
+      if (pts.length < 2){ report("선 따라 보정하려면 점이 2개 이상 필요합니다."); return; }
+      var closed = settings().closed;
+      var segCount = closed ? pts.length : pts.length - 1;
+      if (segCount < 1){ report("선 따라 보정하려면 점이 2개 이상 필요합니다."); return; }
+      var halfWidth = Math.min(settings().radius, 80);
+      var newPts = [], okSegs = 0, chordSegs = 0, added = 0, skippedNoSnap = 0, skippedNoPath = 0;
+      for (var si = 0; si < segCount; si++){
+        var a = pts[si], b = pts[(si + 1) % pts.length];
+        newPts.push(a);
+        if (a.status !== "snap" || b.status !== "snap"){ chordSegs++; skippedNoSnap++; continue; }
+        var chordLen = Math.hypot(b.sx - a.sx, b.sy - a.sy);
+        var res = traceInkPath(S.mask, S.imgW, S.imgH, a.sx, a.sy, b.sx, b.sy, halfWidth);
+        if (!res || !res.path || res.path.length < 3 || res.length > 2.5 * Math.max(chordLen, 1)){
+          chordSegs++; skippedNoPath++; continue;
+        }
+        var simp = douglasPeucker(res.path, 1.0);
+        if (simp.length < 3){ chordSegs++; continue; }
+        /* arc-length fractions along the simplified path, so the rough
+           (original-click) polyline keeps its straight chords */
+        var cum = [0];
+        for (var ci = 1; ci < simp.length; ci++)
+          cum.push(cum[ci - 1] + Math.hypot(simp[ci].x - simp[ci - 1].x, simp[ci].y - simp[ci - 1].y));
+        var total = cum[cum.length - 1] || 1;
+        for (var k = 1; k < simp.length - 1; k++){
+          var t = cum[k] / total;
+          newPts.push({ rx: a.rx + t * (b.rx - a.rx), ry: a.ry + t * (b.ry - a.ry),
+            sx: simp[k].x, sy: simp[k].y, status: "snap",
+            seq: ++S.seq, via: "traced", dist: 0 });
+          added++;
+        }
+        okSegs++;
+      }
+      if (!closed) newPts.push(pts[pts.length - 1]);
+      if (!added){
+        report("선 따라 보정할 구간이 없습니다. " + chordSegs + "개 구간이 직선으로 남았습니다" +
+          (skippedNoSnap ? " (스냅되지 않은 점 포함 " + skippedNoSnap + "개)" : "") +
+          (skippedNoPath ? " (선 없음/너무 김 " + skippedNoPath + "개)" : "") + ".");
+        return;
+      }
+      pushHistory();
+      S.points = newPts; S.selected = -1;
+      render(); renderTable(); syncButtons();
+      report("선 따라 보정 완료: " + segCount + "개 구간 중 " + okSegs + "개 구간에 " + added + "개 점 추가, " +
+        chordSegs + "개 구간은 직선 유지" +
+        (skippedNoPath ? " (선 없음/너무 김 " + skippedNoPath + "개)" : "") + ". 실행취소로 되돌릴 수 있습니다.");
+    }
+    $("btnTraceAlong").addEventListener("click", traceAlongLines);
+
     var pointers = new Map();
     canvas.addEventListener("pointerdown", function(e){
       if (!S.img) return;
@@ -2151,7 +2515,19 @@
         pushHistorySilent();
         if (settings().resnap){
           var s = snapToLine(pt.sx, pt.sy);
-          if (s){ pt.sx = s.x; pt.sy = s.y; pt.status = "snap"; }
+          if (s){
+            /* centerline refinement with the dragged point's own segment
+               direction (previous -> next snapped point) as the hint */
+            var di = S.drag.idx, pv = (di > 0) ? S.points[di - 1] : null,
+                nx = (di + 1 < S.points.length) ? S.points[di + 1] : null, dh = null;
+            if (pv && nx) dh = { x: nx.sx - pv.sx, y: nx.sy - pv.sy };
+            else if (pv) dh = { x: s.x - pv.sx, y: s.y - pv.sy };
+            else if (nx) dh = { x: nx.sx - s.x, y: nx.sy - s.y };
+            var c = (S.mask && dh) ? refineToCenter(S.mask, S.imgW, S.imgH, s.x, s.y, dh) : null;
+            if (c){ pt.sx = c.x; pt.sy = c.y; }
+            else { pt.sx = s.x; pt.sy = s.y; }
+            pt.status = "snap";
+          }
         }
         pt.dist = Math.hypot(pt.sx - pt.rx, pt.sy - pt.ry);
         if (settings().resnap && isFar(pt) && !S.drag.wasFar)
