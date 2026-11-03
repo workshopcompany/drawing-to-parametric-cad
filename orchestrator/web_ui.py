@@ -99,6 +99,12 @@ PAGE_CSS = (
     "padding:8px 10px;font-family:'IBM Plex Mono',monospace;font-size:13px;}"
     "textarea{height:6em;font-family:'IBM Plex Sans',sans-serif;}"
     "input[type=file]{width:100%;font-size:13px;color:#c8d0e0;}"
+    ".file-btn{display:inline-block !important;background:#1a2540 !important;"
+    "color:#7eb8f7 !important;border:1px solid #2a3f6e !important;"
+    "border-radius:6px !important;font-family:'IBM Plex Mono',monospace !important;"
+    "font-size:13px !important;padding:0.6em 1.5em;cursor:pointer;margin:0;}"
+    ".file-btn:hover{background:#243260 !important;border-color:#4a6aae !important;}"
+    ".file-name{margin-left:8px;font-size:13px;color:#c8d0e0;word-break:break-all;}"
     "button,.btn{background:#1a2540 !important;color:#7eb8f7 !important;"
     "border:1px solid #2a3f6e !important;border-radius:6px !important;"
     "font-family:'IBM Plex Mono',monospace !important;font-size:13px !important;"
@@ -850,12 +856,14 @@ def form_page_ko():
     <hr>
     <h3 style="font-size:14px;">&#128193; 파일 열기</h3>
     <label for="drawing">도면 이미지 (PNG/JPG)</label>
-    <input type="file" id="drawing" name="drawing" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp" required>
+    <input type="file" id="drawing" name="drawing" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp" required style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;">
+    <div><label for="drawing" class="file-btn">파일 선택</label> <span id="drawingName" class="file-name" data-empty="선택된 파일 없음">선택된 파일 없음</span></div>
     <div class="drop-hint">PDF는 아직 지원하지 않습니다. PDF 도면은 이미지(PNG/JPG)로 바꿔서 올려주세요.</div>
     <div class="drop-hint">파일을 고르면 전송 전에 이 브라우저 안에서만 미리보기가 뜹니다.</div>
     <img id="drawingPreview" class="preview-live" alt="도면 미리보기">
     <label for="outline">윤곽 첨부 (선택, JSON/이미지)</label>
-    <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt">
+    <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;">
+    <div><label for="outline" class="file-btn">파일 선택</label> <span id="outlineName" class="file-name" data-empty="선택된 파일 없음">선택된 파일 없음</span></div>
     <img id="outlinePreview" class="preview-live" alt="윤곽 미리보기">
     <p class="note">outline_snap_tool.html 출력 JSON 또는 윤곽 이미지. 원본은 출력 폴더에 input_outline.* 로 보관.</p>
     <label for="outline_width_mm">윤곽 실제 폭 (mm, 선택 — 이미지 추적용)</label>
@@ -940,6 +948,8 @@ def form_page_ko():
     if (!input) return;
     input.addEventListener('change', function(){{
       var f = input.files && input.files[0];
+      var nameEl = document.getElementById(inputId + 'Name');
+      if (nameEl) nameEl.textContent = f ? f.name : (nameEl.dataset.empty || '');
       imgIds.forEach(function(id){{
         var img = document.getElementById(id);
         if (!img) return;
@@ -999,12 +1009,14 @@ def form_page_en():
     <hr>
     <h3 style="font-size:14px;">&#128193; Open files</h3>
     <label for="drawing">Drawing image (PNG/JPG)</label>
-    <input type="file" id="drawing" name="drawing" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp" required>
+    <input type="file" id="drawing" name="drawing" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp" required style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;">
+    <div><label for="drawing" class="file-btn">Choose file</label> <span id="drawingName" class="file-name" data-empty="No file chosen">No file chosen</span></div>
     <div class="drop-hint">PDF is not supported yet. Convert a PDF drawing to an image (PNG/JPG) first.</div>
     <div class="drop-hint">Once you pick a file, a preview appears in this browser only, before sending.</div>
     <img id="drawingPreview" class="preview-live" alt="Drawing preview">
     <label for="outline">Outline attachment (optional, JSON/image)</label>
-    <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt">
+    <input type="file" id="outline" name="outline" accept=".json,.bin,.png,.jpg,.jpeg,image/*,.txt" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;">
+    <div><label for="outline" class="file-btn">Choose file</label> <span id="outlineName" class="file-name" data-empty="No file chosen">No file chosen</span></div>
     <img id="outlinePreview" class="preview-live" alt="Outline preview">
     <p class="note">outline_snap_tool.html output JSON or an outline image. The original is kept in the output folder as input_outline.*.</p>
     <label for="outline_width_mm">Outline real width (mm, optional — for image tracing)</label>
@@ -1089,6 +1101,8 @@ def form_page_en():
     if (!input) return;
     input.addEventListener('change', function(){{
       var f = input.files && input.files[0];
+      var nameEl = document.getElementById(inputId + 'Name');
+      if (nameEl) nameEl.textContent = f ? f.name : (nameEl.dataset.empty || '');
       imgIds.forEach(function(id){{
         var img = document.getElementById(id);
         if (!img) return;
